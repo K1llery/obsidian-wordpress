@@ -78268,12 +78268,46 @@ var MIME_BY_EXTENSION = {
 };
 var MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(\s*(?:<([^<>]*)>|((?:[^()\s\\]|\([^()\s]*\))+))(?:\s+"([^"]*)")?\s*\)/g;
 var WIKI_EMBED_RE = /!\[\[([^|\]\n]+)(?:\|([^\]\n]+))?\]\]/g;
+function findCodeRanges(content) {
+  const ranges = [];
+  const fenceRe = /(?:^|\n)[ \t]*(`{3,}|~{3,})[^\n]*/g;
+  let open = null;
+  let match3;
+  while ((match3 = fenceRe.exec(content)) !== null) {
+    const lineStart = match3.index + (match3[0].startsWith("\n") ? 1 : 0);
+    const mark = match3[1];
+    if (open === null) {
+      open = { start: lineStart, mark };
+    } else if (mark[0] === open.mark[0] && mark.length >= open.mark.length) {
+      ranges.push([open.start, match3.index + match3[0].length]);
+      open = null;
+    }
+  }
+  if (open !== null) {
+    ranges.push([open.start, content.length]);
+  }
+  const inlineRe = /`+[^`\n]*`+/g;
+  while ((match3 = inlineRe.exec(content)) !== null) {
+    if (ranges.some(([start, end2]) => match3.index >= start && match3.index < end2)) {
+      continue;
+    }
+    ranges.push([match3.index, match3.index + match3[0].length]);
+  }
+  return ranges;
+}
+function inRanges(index2, ranges) {
+  return ranges.some(([start, end2]) => index2 >= start && index2 < end2);
+}
 function getMediaRefs(content) {
   var _a2, _b, _c;
   const refs = [];
+  const codeRanges = findCodeRanges(content);
   let match3;
   MARKDOWN_IMAGE_RE.lastIndex = 0;
   while ((match3 = MARKDOWN_IMAGE_RE.exec(content)) !== null) {
+    if (inRanges(match3.index, codeRanges)) {
+      continue;
+    }
     const src = ((_b = (_a2 = match3[2]) != null ? _a2 : match3[3]) != null ? _b : "").trim();
     if (src.length === 0) {
       continue;
@@ -78303,6 +78337,9 @@ function getMediaRefs(content) {
   }
   WIKI_EMBED_RE.lastIndex = 0;
   while ((match3 = WIKI_EMBED_RE.exec(content)) !== null) {
+    if (inRanges(match3.index, codeRanges)) {
+      continue;
+    }
     const src = match3[1].trim();
     let altText;
     let width;
@@ -78418,12 +78455,16 @@ async function expandNoteEmbeds(app, sourceFile, content, options = {}) {
   }
   const embedRe = /!\[\[([^\][|\n]+?)(#[^\][|\n]*)?(?:\|[^\][\n]*)?\]\]/g;
   const matches = [...content.matchAll(embedRe)].reverse();
+  const codeRanges = findCodeRanges(content);
   let result = content;
   for (const match3 of matches) {
     const original = match3[0];
     const target = match3[1];
     const subpath = match3[2];
     const matchIndex = (_c = match3.index) != null ? _c : 0;
+    if (inRanges(matchIndex, codeRanges)) {
+      continue;
+    }
     const dest = app.metadataCache.getFirstLinkpathDest(target.trim(), sourceFile.path);
     if (!(dest instanceof import_obsidian8.TFile) || dest.extension !== "md") {
       continue;

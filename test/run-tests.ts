@@ -361,6 +361,34 @@ async function main(): Promise<void> {
     assertEqual(result.content, 'see ![[image.png]]');
   });
 
+  await test('does not expand embeds inside inline code', async () => {
+    const files: Record<string, string> = {
+      'main.md': 'syntax: `![[child]]` and ![[child]]',
+      'child.md': 'child content',
+    };
+    const app = createFakeApp(files);
+    const result = await expandNoteEmbeds(app as never, new TFile('main.md'), files[ 'main.md' ]);
+    assertEqual(result.content, 'syntax: `![[child]]` and child content');
+    assertEqual(result.failed, []);
+  });
+
+  await test('does not expand embeds inside code fences', async () => {
+    const files: Record<string, string> = {
+      'main.md': '```\n![[child]]\n```\n\n![[child]]',
+      'child.md': 'child content',
+    };
+    const app = createFakeApp(files);
+    const result = await expandNoteEmbeds(app as never, new TFile('main.md'), files[ 'main.md' ]);
+    assertEqual(result.content, '```\n![[child]]\n```\n\nchild content');
+    assertEqual(result.failed, []);
+  });
+
+  await test('does not treat embeds in code as media refs', () => {
+    const refs = getMediaRefs('code: `![[a.png]]` fence:\n\n```\n![[b.png]]\n```\n\nreal: ![[c.png]]');
+    assertEqual(refs.length, 1);
+    assertEqual(refs[0].src, 'c.png');
+  });
+
   console.log('wikilink resolver:');
 
   await test('resolves published targets to permalinks', () => {

@@ -81,14 +81,60 @@ const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(\s*(?:<([^<>]*)>|((?:[^()\s\\]|\([^()\
 const WIKI_EMBED_RE = /!\[\[([^|\]\n]+)(?:\|([^\]\n]+))?\]\]/g;
 
 /**
- * Extracts all media references from the content.
+ * Returns the `[start, end)` ranges of fenced code blocks and inline
+ * code spans in the content. Embed/media syntax inside code must be
+ * left untouched, it is part of the code, not of the note structure.
+ */
+export function findCodeRanges(content: string): Array<[ number, number ]> {
+  const ranges: Array<[ number, number ]> = [];
+
+  // fenced code blocks (``` or ~~~)
+  const fenceRe = /(?:^|\n)[ \t]*(`{3,}|~{3,})[^\n]*/g;
+  let open: { start: number, mark: string } | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = fenceRe.exec(content)) !== null) {
+    const lineStart = match.index + (match[0].startsWith('\n') ? 1 : 0);
+    const mark = match[1];
+    if (open === null) {
+      open = { start: lineStart, mark };
+    } else if (mark[0] === open.mark[0] && mark.length >= open.mark.length) {
+      ranges.push([ open.start, match.index + match[0].length ]);
+      open = null;
+    }
+  }
+  if (open !== null) {
+    ranges.push([ open.start, content.length ]);
+  }
+
+  // inline code spans, only outside of fenced blocks
+  const inlineRe = /`+[^`\n]*`+/g;
+  while ((match = inlineRe.exec(content)) !== null) {
+    if (ranges.some(([ start, end ]) => match!.index >= start && match!.index < end)) {
+      continue;
+    }
+    ranges.push([ match.index, match.index + match[0].length ]);
+  }
+  return ranges;
+}
+
+function inRanges(index: number, ranges: Array<[ number, number ]>): boolean {
+  return ranges.some(([ start, end ]) => index >= start && index < end);
+}
+
+/**
+ * Extracts all media references from the content. References inside
+ * code fences and inline code spans are ignored.
  */
 export function getMediaRefs(content: string): MediaRef[] {
   const refs: MediaRef[] = [];
+  const codeRanges = findCodeRanges(content);
 
   let match: RegExpExecArray | null;
   MARKDOWN_IMAGE_RE.lastIndex = 0;
   while ((match = MARKDOWN_IMAGE_RE.exec(content)) !== null) {
+    if (inRanges(match.index, codeRanges)) {
+      continue;
+    }
     // match groups: 1 = alt, 2 = braced path, 3 = bare path, 4 = title
     const src = (match[2] ?? match[3] ?? '').trim();
     if (src.length === 0) {
@@ -121,6 +167,9 @@ export function getMediaRefs(content: string): MediaRef[] {
 
   WIKI_EMBED_RE.lastIndex = 0;
   while ((match = WIKI_EMBED_RE.exec(content)) !== null) {
+    if (inRanges(match.index, codeRanges)) {
+      continue;
+    }
     const src = match[1].trim();
     // match[2] could be a size (`100` or `100x200`) or an alt text
     let altText: string | undefined;
@@ -283,6 +332,7 @@ export async function expandNoteEmbeds(
   const embedRe = /!\[\[([^\][|\n]+?)(#[^\][|\n]*)?(?:\|[^\][\n]*)?\]\]/g;
   // collect matches first, then replace from the last one to keep indices valid
   const matches = [ ...content.matchAll(embedRe) ].reverse();
+  const codeRanges = findCodeRanges(content);
 
   let result = content;
   for (const match of matches) {
@@ -290,6 +340,10 @@ export async function expandNoteEmbeds(
     const target = match[1];
     const subpath = match[2];
     const matchIndex = match.index ?? 0;
+    if (inRanges(matchIndex, codeRanges)) {
+      // embeds inside code fences or inline code are part of the code
+      continue;
+    }
     const dest = app.metadataCache.getFirstLinkpathDest(target.trim(), sourceFile.path);
     if (!(dest instanceof TFile) || dest.extension !== 'md') {
       continue;
