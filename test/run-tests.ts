@@ -12,6 +12,7 @@ import { CodeHighlightPluginInstance } from '../src/code-highlight';
 import { ensureEmbeddedStyles } from '../src/embedded-styles';
 import { renderMermaidDiagrams } from '../src/mermaid-renderer';
 import {
+  collectWikiLinkTargets,
   createWikiLinkResolver,
   expandNoteEmbeds,
   extractSection,
@@ -513,6 +514,28 @@ async function main(): Promise<void> {
     const source = 'plain\n\n```ts\nconst a = 1;\n```\n';
     const result = await renderMermaidDiagrams(source, async () => '<svg/>');
     assertEqual(result.content, source);
+  });
+
+  console.log('linked note targets:');
+
+  await test('collects wikilink targets without embeds, code and aliases', () => {
+    const content = [
+      'link: [[target-one]]',
+      'alias: [[target-two|the alias]]',
+      'heading: [[target-three#sec|go]]',
+      'embed: ![[not-a-link.png]]',
+      'code: `[[not-a-link-either]]`',
+      'fence:',
+      '```',
+      '[[also-not-a-link]]',
+      '```',
+      'dup: [[target-one]]',
+    ].join('\n');
+    assertEqual(collectWikiLinkTargets(content), [ 'target-one', 'target-two', 'target-three' ]);
+  });
+
+  await test('collects nothing from content without wikilinks', () => {
+    assertEqual(collectWikiLinkTargets('no links here, only [md](links)').length, 0);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

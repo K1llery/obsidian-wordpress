@@ -295,6 +295,34 @@ function extractBlockReference(content: string, blockId: string): string | undef
   return undefined;
 }
 
+/**
+ * Collects the wikilink targets (`[[note]]`, `[[note|alias]]`,
+ * `[[note#heading]]`) from the content. Embeds (`![[...]]`), links
+ * inside code and targets that are empty after stripping alias and
+ * subpath are ignored.
+ */
+export function collectWikiLinkTargets(content: string): string[] {
+  const codeRanges = findCodeRanges(content);
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  const re = /\[\[([^\][\n]+)\]\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(content)) !== null) {
+    if (match.index > 0 && content[match.index - 1] === '!') {
+      continue;
+    }
+    if (inRanges(match.index, codeRanges)) {
+      continue;
+    }
+    const target = match[1].split('|')[0].split('#')[0].trim();
+    if (target.length > 0 && !seen.has(target)) {
+      seen.add(target);
+      targets.push(target);
+    }
+  }
+  return targets;
+}
+
 export interface EmbedExpandResult {
   content: string;
 

@@ -76,6 +76,13 @@ export interface WordpressPluginSettings {
   replaceMediaLinks: boolean;
 
   /**
+   * Whether unpublished notes referenced by wikilinks should be
+   * published automatically (with default options) before the
+   * current note.
+   */
+  autoPublishLinkedNotes: boolean;
+
+  /**
    * Cache of uploaded media, keyed by the vault file path.
    * Used to avoid uploading the same file again on re-publishing.
    */
@@ -94,6 +101,7 @@ export const DEFAULT_SETTINGS: WordpressPluginSettings = {
   commentConvertMode: CommentConvertMode.Ignore,
   enableHtml: false,
   replaceMediaLinks: false,
+  autoPublishLinkedNotes: true,
 }
 
 export async function upgradeSettings(

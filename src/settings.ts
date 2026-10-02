@@ -210,6 +210,18 @@ export class WordpressSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName(t('settings_autoPublishLinkedNotes'))
+      .setDesc(t('settings_autoPublishLinkedNotesDesc'))
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoPublishLinkedNotes)
+          .onChange(async (value) => {
+            this.plugin.settings.autoPublishLinkedNotes = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName(t('settings_clearMediaCache'))
       .setDesc(t('settings_clearMediaCacheDesc'))
       .addButton(button => button

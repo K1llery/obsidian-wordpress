@@ -79,7 +79,9 @@ export class WpXmlRpcClient extends AbstractWordPressClient {
     if (postParams.date) {
       const date = new Date(postParams.date);
       if (!isNaN(date.getTime())) {
-        publishContent.post_date_gmt = date;
+        // frontmatter dates are wall times in the site timezone,
+        // so they map to post_date rather than post_date_gmt
+        publishContent.post_date = date;
       }
     } else if (postParams.status === PostStatus.Future) {
       publishContent.post_date = postParams.datetime ?? new Date();

@@ -25,6 +25,7 @@ import { MarkdownItWikiLinkPluginInstance } from './markdown-it-wikilink-plugin'
 import { renderMermaidDiagrams } from './mermaid-renderer';
 import { ensureEmbeddedStyles } from './embedded-styles';
 import {
+  collectWikiLinkTargets,
   createWikiLinkResolver,
   decodeMediaSrc,
   expandNoteEmbeds,
@@ -169,6 +170,14 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       }), ERROR_NOTICE_TIMEOUT);
     }
     const html = ensureEmbeddedStyles(AppState.markdownParser.render(postParams.content));
+    const highlighted = (html.match(/class="language-/g) ?? []).length;
+    if (mermaidResult.rendered > 0 || highlighted > 0) {
+      // lets the user confirm the new publish pipeline actually ran
+      new Notice(this.plugin.i18n.t('message_publishPipelineStats', {
+        mermaid: String(mermaidResult.rendered),
+        code: String(highlighted)
+      }), ERROR_NOTICE_TIMEOUT);
+    }
     this.showUnresolvedLinks();
     const result = await this.publish(
       postParams.title ?? 'A post from Obsidian!',
@@ -346,14 +355,32 @@ export abstract class AbstractWordPressClient implements WordPressClient {
   }
 
   async publishPost(defaultPostParams?: WordPressPostParams): Promise<WordPressClientResult<WordPressPublishResult>> {
+    const file = this.plugin.app.workspace.getActiveFile();
+    if (file === null) {
+      throw new Error(this.plugin.i18n.t('error_noActiveFile'));
+    }
+    return this.publishFile(file, { defaultPostParams });
+  }
+
+  /**
+   * Publishes a single note file. Notes referenced by wikilinks which
+   * have not been published yet are published first (recursively,
+   * cycle-safe) when the `autoPublishLinkedNotes` setting is on.
+   */
+  private async publishFile(
+    file: TFile,
+    options: {
+      defaultPostParams?: WordPressPostParams,
+      auto?: boolean,
+      visited?: Set<string>,
+    } = {}
+  ): Promise<WordPressClientResult<WordPressPublishResult>> {
+    const { defaultPostParams, auto = false } = options;
+    const visited = options.visited ?? new Set<string>();
+    visited.add(file.path);
     try {
       if (!this.profile.endpoint || this.profile.endpoint.length === 0) {
         throw new Error(this.plugin.i18n.t('error_noEndpoint'));
-      }
-      // const { activeEditor } = this.plugin.app.workspace;
-      const file = this.plugin.app.workspace.getActiveFile()
-      if (file === null) {
-        throw new Error(this.plugin.i18n.t('error_noActiveFile'));
       }
 
       // get auth info
@@ -371,30 +398,36 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         }), ERROR_NOTICE_TIMEOUT);
       }
 
-      // check if profile selected is matched to the one in note property,
-      // if not, ask whether to update or not
-      const useOldProfile = await this.checkExistingProfile(matterData);
-      if (useOldProfile) {
-        // the user wants to publish with the profile stored in the note,
-        // republish with that profile instead of the current one, otherwise
-        // the post id from another site would be used against this site
-        const oldProfile = this.plugin.settings.profiles.find(p => p.name === matterData.profileName);
-        if (oldProfile) {
-          const client = getWordPressClient(this.plugin, oldProfile);
-          if (client) {
-            return client.publishPost(defaultPostParams);
+      if (!auto) {
+        // check if profile selected is matched to the one in note property,
+        // if not, ask whether to update or not
+        const useOldProfile = await this.checkExistingProfile(matterData);
+        if (useOldProfile) {
+          // the user wants to publish with the profile stored in the note,
+          // republish with that profile instead of the current one, otherwise
+          // the post id from another site would be used against this site
+          const oldProfile = this.plugin.settings.profiles.find(p => p.name === matterData.profileName);
+          if (oldProfile) {
+            const client = getWordPressClient(this.plugin, oldProfile);
+            if (client) {
+              return client.publishPost(defaultPostParams);
+            }
           }
+          throw new Error(this.plugin.i18n.t('error_noSuchProfile', {
+            profileName: String(matterData.profileName)
+          }));
         }
-        throw new Error(this.plugin.i18n.t('error_noSuchProfile', {
-          profileName: String(matterData.profileName)
-        }));
       }
+
+      // publish notes referenced by wikilinks before this note, so that
+      // the links can resolve to their permalinks
+      await this.autoPublishLinkedNotes(file, expandResult.content, visited);
 
       // now we're preparing the publishing data
       let postParams: WordPressPostParams;
       let result: WordPressClientResult<WordPressPublishResult> | undefined;
-      if (defaultPostParams) {
-        postParams = this.readFromFrontMatter(title, matterData, defaultPostParams);
+      if (defaultPostParams || auto) {
+        postParams = this.readFromFrontMatter(title, matterData, defaultPostParams ?? this.buildDefaultPostParams());
         postParams.content = expandResult.content;
         result = await this.tryToPublish({
           auth,
@@ -454,6 +487,63 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         throw error;
       }
     }
+  }
+
+  /**
+   * Publishes unpublished notes which are referenced by wikilinks in
+   * the content before the current note, so that wikilinks resolve to
+   * their permalinks. Already published notes (frontmatter `postId`)
+   * are skipped, cycles are handled through the visited set.
+   */
+  private async autoPublishLinkedNotes(
+    sourceFile: TFile,
+    content: string,
+    visited: Set<string>
+  ): Promise<void> {
+    if (!this.plugin.settings.autoPublishLinkedNotes) {
+      return;
+    }
+    const seen = new Set<string>();
+    for (const target of collectWikiLinkTargets(content)) {
+      if (seen.has(target)) {
+        continue;
+      }
+      seen.add(target);
+      const dest = this.plugin.app.metadataCache.getFirstLinkpathDest(target, sourceFile.path);
+      if (!(dest instanceof TFile) || dest.extension !== 'md') {
+        continue;
+      }
+      if (visited.has(dest.path)) {
+        continue;
+      }
+      const frontmatter = this.plugin.app.metadataCache.getFileCache(dest)?.frontmatter;
+      if (frontmatter?.postId) {
+        // already published, the wikilink will resolve to its permalink
+        continue;
+      }
+      visited.add(dest.path);
+      new Notice(this.plugin.i18n.t('message_autoPublishingLinked', {
+        name: dest.basename
+      }), ERROR_NOTICE_TIMEOUT);
+      try {
+        await this.publishFile(dest, { auto: true, visited });
+      } catch (error) {
+        // a failed linked note does not block publishing the current one
+        showError(error);
+      }
+    }
+  }
+
+  private buildDefaultPostParams(): WordPressPostParams {
+    return {
+      status: this.plugin.settings.defaultPostStatus,
+      commentStatus: this.plugin.settings.defaultCommentStatus,
+      categories: this.profile.lastSelectedCategories ?? [ 1 ],
+      postType: PostTypeConst.Post,
+      tags: [],
+      title: '',
+      content: '',
+    };
   }
 
   private async getTags(tags: string[], certificate: WordPressAuthParams): Promise<Term[]> {

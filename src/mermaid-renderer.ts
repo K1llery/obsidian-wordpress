@@ -12,6 +12,12 @@ let defaultRenderer: MermaidSvgRenderer | null = null;
  * at publish time and embedded into the post — no WordPress-side
  * mermaid plugin is needed.
  */
+/**
+ * How long a single diagram may take to render before it is treated
+ * as failed and the original fence is kept.
+ */
+const RENDER_TIMEOUT_MS = 15000;
+
 async function getDefaultRenderer(): Promise<MermaidSvgRenderer> {
   if (defaultRenderer === null) {
     defaultRenderer = async (code: string): Promise<string> => {
@@ -23,12 +29,32 @@ async function getDefaultRenderer(): Promise<MermaidSvgRenderer> {
         startOnLoad: false,
         securityLevel: 'strict',
         theme: 'default',
+        // pure SVG text labels instead of foreignObject HTML labels,
+        // which survive WordPress sanitization much better
+        flowchart: { htmlLabels: false },
+        class: { htmlLabels: false },
       });
       const { svg } = await mermaid.render(`ob-mermaid-svg-${++counter}`, code);
       return svg;
     };
   }
   return defaultRenderer;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`render timed out after ${ms}ms`)), ms);
+    promise.then(
+      value => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      error => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 interface MermaidFenceBlock {
@@ -87,6 +113,11 @@ export interface MermaidRenderResult {
   content: string;
 
   /**
+   * Number of diagrams successfully rendered to SVG.
+   */
+  rendered: number;
+
+  /**
    * First lines of the diagrams which failed to render. Their original
    * code fences are kept in the content.
    */
@@ -106,7 +137,7 @@ export async function renderMermaidDiagrams(
 ): Promise<MermaidRenderResult> {
   const blocks = findMermaidFences(content);
   if (blocks.length === 0) {
-    return { content, failed: [] };
+    return { content, rendered: 0, failed: [] };
   }
 
   const render = renderSvg ?? await getDefaultRenderer();
@@ -115,19 +146,21 @@ export async function renderMermaidDiagrams(
   const eol = content.includes('\r\n') ? '\r\n' : '\n';
   const lines = content.split(/\r?\n/);
   const failed: string[] = [];
+  let rendered = 0;
 
   // replace from the last block to keep the earlier line indices valid
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i];
     try {
-      const svg = await render(block.code);
+      const svg = await withTimeout(render(block.code), RENDER_TIMEOUT_MS);
       const placeholder = `ob-mermaid-${++counter}`;
       MarkdownItMermaidPluginInstance.setSvg(placeholder, svg);
       lines.splice(block.startLine, block.endLine - block.startLine + 1, '```ob-mermaid', placeholder, '```');
+      rendered++;
     } catch {
       failed.push(block.code.trim().split('\n')[0] ?? 'diagram');
     }
   }
 
-  return { content: lines.join(eol), failed };
+  return { content: lines.join(eol), rendered, failed };
 }
