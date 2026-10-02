@@ -107,3 +107,59 @@ should be raised again and the plugin should be authorized.
 
 **Note**, the plugin fetched wordpress.com token might be expired in two weeks by default. If publishes
 failed some day, 'Refresh' button should be clicked in order to get a new token.
+
+## Obsidian syntax support
+
+The following Obsidian syntax is converted while publishing:
+
+* **Wikilinks** `[[note]]`, `[[note|alias]]` and `[[note#heading]]`: if the target note
+  has been published with the same profile, the link becomes a permalink of the
+  published post. Otherwise it is rendered as plain text and a notice is shown.
+* **Note embeds** `![[note]]` and `![[note#heading]]`: the embedded note content is
+  expanded into the published post (up to 5 levels deep, cyclic embeds are skipped).
+* **Callouts** `> [!note] Title`: rendered as `<div class="callout callout-note">`
+  with the type icon. Callouts with a fold marker (`-` or `+`) become collapsible
+  `<details>`/`<summary>` elements. Style them with CSS on your WordPress site.
+* **Task lists** `- [ ]` / `- [x]`: rendered as HTML checkboxes.
+* **Highlights** `==text==`: rendered as `<mark>text</mark>`.
+* **Footnotes** `[^1]`: rendered as HTML footnotes.
+* **Mermaid** diagrams: ``` ```mermaid ``` fences are rendered as
+  `<pre class="mermaid">` blocks which can be rendered by a WordPress mermaid
+  plugin, e.g. [WP Mermaid](https://wordpress.org/plugins/wp-mermaid/).
+* **Comments** `%%...%%`: single-line and multi-line comment blocks are supported.
+* **Math** `$...$` and `$$...$$`: rendered as SVG or TeX depending on the
+  MathJax output format setting.
+
+## Media files and attachments
+
+Local images and other media files referenced by a note are uploaded to the
+WordPress media library before publishing, and the links are rewritten to the
+uploaded URLs. Both Obsidian wiki embeds (`![[image.png]]`,
+`![[image.png|300]]`, `![[image.png|some alt]]`) and markdown images
+(`![alt](image.png)`) are supported. Media files with paths relative to the
+note are resolved correctly. Non-image attachments such as PDFs are uploaded
+and linked.
+
+Uploaded media files are remembered, so publishing the same note again does
+not upload the same files again. The cache can be cleared with the
+`Clear media upload cache` button in the plugin settings.
+
+**Replace media links**: if enabled, the media links in the note itself are
+replaced with the WordPress URLs after uploading. It is disabled by default
+since the uploaded files are remembered anyway.
+
+## Frontmatter properties
+
+The following note properties are recognized while publishing:
+
+* `title`: overrides the post title.
+* `postId`: updates the existing WordPress post with this id.
+* `profileName`, `postType`, `categories`, `tags`: same as before.
+  Tags could be a list or a comma-separated string.
+* `excerpt`: the post excerpt.
+* `slug`: the post slug (permalink name).
+* `date`: the post date, e.g. `2026-10-02 12:00:00`.
+
+After publishing, the plugin writes back `profileName`, `postId`, `postType`,
+`categories` and `postLink` (the permalink of the published post, used for
+converting wikilinks from other notes).
