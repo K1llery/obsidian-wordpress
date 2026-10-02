@@ -71,6 +71,21 @@ export interface WordPressPostParams {
   profileName?: string;
 
   datetime?: Date;
+
+  /**
+   * Post excerpt, read from the note frontmatter.
+   */
+  excerpt?: string;
+
+  /**
+   * Post slug (permalink name), read from the note frontmatter.
+   */
+  slug?: string;
+
+  /**
+   * Post date in the note frontmatter, e.g. `2026-10-02 12:00:00`.
+   */
+  date?: string;
 }
 
 export interface WordPressPublishParams extends WordPressAuthParams {
@@ -81,6 +96,11 @@ export interface WordPressPublishParams extends WordPressAuthParams {
 export interface WordPressPublishResult {
   postId: string;
   categories: number[];
+
+  /**
+   * The permalink of the published post, if known.
+   */
+  link?: string;
 }
 
 export interface WordPressMediaUploadResult {

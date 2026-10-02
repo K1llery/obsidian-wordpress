@@ -159,7 +159,6 @@ export default class WordpressPlugin extends Plugin {
               redirectUri: WP_OAUTH2_REDIRECT_URI,
               codeVerifier: AppState.codeVerifier
             });
-            console.log(token);
             AppState.events.trigger(EventType.OAUTH2_TOKEN_GOT, token);
           }
         }

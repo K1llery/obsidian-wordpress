@@ -12,15 +12,25 @@ import {
 import { WpPublishModal } from './wp-publish-modal';
 import { PostType, PostTypeConst, Term } from './wp-api';
 import { ERROR_NOTICE_TIMEOUT, WP_DEFAULT_PROFILE_NAME } from './consts';
-import { isPromiseFulfilledResult, isValidUrl, openWithBrowser, processFile, SafeAny, showError, } from './utils';
+import { isPromiseFulfilledResult, openWithBrowser, processFile, SafeAny, showError, } from './utils';
+import { getWordPressClient } from './wp-clients';
 import { WpProfile } from './wp-profile';
 import { AppState } from './app-state';
 import { ConfirmCode, openConfirmModal } from './confirm-modal';
-import fileTypeChecker from 'file-type-checker';
 import { MatterData, Media } from './types';
 import { openPostPublishedModal } from './post-published-modal';
 import { openLoginModal } from './wp-login-modal';
-import { isFunction } from 'lodash-es';
+import { isFunction, isArray, isString } from 'lodash-es';
+import { MarkdownItWikiLinkPluginInstance } from './markdown-it-wikilink-plugin';
+import {
+  createWikiLinkResolver,
+  decodeMediaSrc,
+  expandNoteEmbeds,
+  getMediaRefs,
+  isImageFile,
+  MediaRef,
+  mimeTypeFor
+} from './publish-converters';
 
 export abstract class AbstractWordPressClient implements WordPressClient {
 
@@ -97,7 +107,15 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     return auth;
   }
 
-  private async checkExistingProfile(matterData: MatterData) {
+  /**
+   * Checks if the profile in the note frontmatter matches the current
+   * one. Asks the user what to do if not.
+   *
+   * Returns `true` if the user chose to publish with the profile
+   * stored in the frontmatter. The caller should then republish
+   * using that profile instead.
+   */
+  private async checkExistingProfile(matterData: MatterData): Promise<boolean> {
     const { profileName } = matterData;
     const isProfileNameMismatch = profileName && profileName !== this.profile.name;
     if (isProfileNameMismatch) {
@@ -113,23 +131,34 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       if (confirm.code !== ConfirmCode.Cancel) {
         delete matterData.postId;
         matterData.categories = this.profile.lastSelectedCategories ?? [ 1 ];
+        return false;
       }
+      return true;
     }
+    return false;
   }
 
   private async tryToPublish(params: {
     postParams: WordPressPostParams,
     auth: WordPressAuthParams,
+    sourceFile: TFile,
     updateMatterData?: (matter: MatterData) => void,
   }): Promise<WordPressClientResult<WordPressPublishResult>> {
-    const { postParams, auth, updateMatterData } = params;
+    const { postParams, auth, sourceFile, updateMatterData } = params;
     const tagTerms = await this.getTags(postParams.tags, auth);
     postParams.tags = tagTerms.map(term => term.id);
     await this.updatePostImages({
       auth,
-      postParams
+      postParams,
+      sourceFile
     });
+    // links to other published notes are converted to their permalinks
+    MarkdownItWikiLinkPluginInstance.resetUnresolved();
+    MarkdownItWikiLinkPluginInstance.setResolver(
+      createWikiLinkResolver(this.plugin.app, this.profile, sourceFile)
+    );
     const html = AppState.markdownParser.render(postParams.content);
+    this.showUnresolvedLinks();
     const result = await this.publish(
       postParams.title ?? 'A post from Obsidian!',
       html,
@@ -145,22 +174,23 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       // post id will be returned if creating, true if editing
       const postId = result.data.postId;
       if (postId) {
-        // const modified = matter.stringify(postParams.content, matterData, matterOptions);
-        // this.updateFrontMatter(modified);
-        const file = this.plugin.app.workspace.getActiveFile();
-        if (file) {
-          await this.plugin.app.fileManager.processFrontMatter(file, fm => {
-            fm.profileName = this.profile.name;
-            fm.postId = postId;
-            fm.postType = postParams.postType;
-            if (postParams.postType === PostTypeConst.Post) {
-              fm.categories = postParams.categories;
-            }
-            if (isFunction(updateMatterData)) {
-              updateMatterData(fm);
-            }
-          });
-        }
+        const postLink = result.data.link;
+        await this.plugin.app.fileManager.processFrontMatter(sourceFile, fm => {
+          fm.profileName = this.profile.name;
+          fm.postId = postId;
+          fm.postType = postParams.postType;
+          if (postParams.postType === PostTypeConst.Post) {
+            fm.categories = postParams.categories;
+          }
+          // remember the permalink of the published post, so that
+          // wikilinks from other notes could link to this post
+          if (postLink) {
+            fm.postLink = postLink;
+          }
+          if (isFunction(updateMatterData)) {
+            updateMatterData(fm);
+          }
+        });
 
         if (this.plugin.settings.rememberLastSelectedCategories) {
           this.profile.lastSelectedCategories = (result.data as SafeAny).categories;
@@ -181,62 +211,127 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     return result;
   }
 
+  private showUnresolvedLinks(): void {
+    const unresolved = MarkdownItWikiLinkPluginInstance.takeUnresolved();
+    if (unresolved.length > 0) {
+      const links = [ ...new Set(unresolved) ].slice(0, 5).join(', ');
+      const suffix = unresolved.length > 5 ? '…' : '';
+      new Notice(this.plugin.i18n.t('warning_unresolvedLinks', {
+        links: `${links}${suffix}`
+      }), ERROR_NOTICE_TIMEOUT);
+    }
+  }
+
   private async updatePostImages(params: {
     postParams: WordPressPostParams,
     auth: WordPressAuthParams,
+    sourceFile: TFile,
   }): Promise<void> {
-    const { postParams, auth } = params;
+    const { postParams, auth, sourceFile } = params;
 
-    const activeFile = this.plugin.app.workspace.getActiveFile();
-    if (activeFile === null) {
-      throw new Error(this.plugin.i18n.t('error_noActiveFile'));
+    const mediaRefs = getMediaRefs(postParams.content);
+    if (mediaRefs.length === 0) {
+      return;
     }
-    const { activeEditor } = this.plugin.app.workspace;
-    if (activeEditor && activeEditor.editor) {
-      // process images
-      const images = getImages(postParams.content);
-      for (const img of images) {
-        if (!img.srcIsUrl) {
-          img.src = decodeURI(img.src);
-          const fileName = img.src.split("/").pop();
-          if (fileName === undefined) {
-            continue;
-          }
-          const imgFile = this.plugin.app.metadataCache.getFirstLinkpathDest(img.src, fileName);
-          if (imgFile instanceof TFile) {
-            const content = await this.plugin.app.vault.readBinary(imgFile);
-            const fileType = fileTypeChecker.detectFile(content);
-            const result = await this.uploadMedia({
-              mimeType: fileType?.mimeType ?? 'application/octet-stream',
-              fileName: imgFile.name,
-              content: content
-            }, auth);
-            if (result.code === WordPressClientReturnCode.OK) {
-              if(img.width && img.height){
-                  postParams.content = postParams.content.replace(img.original, `![[${result.data.url}|${img.width}x${img.height}]]`);
-              }else if (img.width){
-                  postParams.content = postParams.content.replace(img.original, `![[${result.data.url}|${img.width}]]`);
-              }else{
-                  postParams.content = postParams.content.replace(img.original, `![[${result.data.url}]]`);
-              }
-            } else {
-              if (result.error.code === WordPressClientReturnCode.ServerInternalError) {
-                new Notice(result.error.message, ERROR_NOTICE_TIMEOUT);
-              } else {
-                new Notice(this.plugin.i18n.t('error_mediaUploadFailed', {
-                  name: imgFile.name,
-                }), ERROR_NOTICE_TIMEOUT);
-              }
-            }
-          }
+
+    const replacements: { original: string, replacement: string }[] = [];
+    // cache of uploaded media during this publish, so that the same
+    // media file is only uploaded once per publish
+    const uploadedInThisPublish = new Map<string, string>();
+
+    for (const ref of mediaRefs) {
+      if (ref.isUrl) {
+        // src is a url, skip uploading
+        continue;
+      }
+      const linkpath = decodeMediaSrc(ref.src.split('#')[0].trim());
+      if (linkpath.length === 0) {
+        continue;
+      }
+      const mediaFile = this.plugin.app.metadataCache.getFirstLinkpathDest(linkpath, sourceFile.path);
+      if (!(mediaFile instanceof TFile)) {
+        new Notice(this.plugin.i18n.t('warning_mediaNotFound', {
+          name: ref.src
+        }), ERROR_NOTICE_TIMEOUT);
+        continue;
+      }
+
+      let url = uploadedInThisPublish.get(mediaFile.path);
+      if (!url) {
+        url = this.getCachedMediaUrl(mediaFile);
+      }
+      if (!url) {
+        const content = await this.plugin.app.vault.readBinary(mediaFile);
+        const result = await this.uploadMedia({
+          mimeType: mimeTypeFor(mediaFile, content),
+          fileName: mediaFile.name,
+          content: content
+        }, auth);
+        if (result.code === WordPressClientReturnCode.OK) {
+          url = result.data.url;
+          uploadedInThisPublish.set(mediaFile.path, url);
+          this.setCachedMediaUrl(mediaFile, url);
+        } else if (result.error.code === WordPressClientReturnCode.ServerInternalError) {
+          new Notice(result.error.message, ERROR_NOTICE_TIMEOUT);
+          continue;
         } else {
-          // src is a url, skip uploading
+          new Notice(this.plugin.i18n.t('error_mediaUploadFailed', {
+            name: mediaFile.name,
+          }), ERROR_NOTICE_TIMEOUT);
+          continue;
         }
+      } else {
+        uploadedInThisPublish.set(mediaFile.path, url);
       }
-      if (this.plugin.settings.replaceMediaLinks) {
-        activeEditor.editor.setValue(postParams.content);
+
+      replacements.push({
+        original: ref.original,
+        replacement: buildMediaReplacement(ref, mediaFile, url),
+      });
+    }
+
+    for (const { original, replacement } of replacements) {
+      postParams.content = postParams.content.replace(original, replacement);
+    }
+
+    if (this.plugin.settings.replaceMediaLinks && replacements.length > 0) {
+      // replace the media links in the note itself. The expanded content
+      // is never written back, only the media replacements are applied
+      // to the original note content.
+      let noteContent = await this.plugin.app.vault.read(sourceFile);
+      for (const { original, replacement } of replacements) {
+        noteContent = noteContent.replace(original, replacement);
+      }
+      if (noteContent !== (await this.plugin.app.vault.read(sourceFile))) {
+        await this.plugin.app.vault.modify(sourceFile, noteContent);
       }
     }
+  }
+
+  /**
+   * Returns the uploaded WordPress URL of the media file if it has been
+   * uploaded before and has not been modified since then.
+   */
+  private getCachedMediaUrl(file: TFile): string | undefined {
+    const cache = this.plugin.settings.mediaUploadCache;
+    const entry = cache?.[file.path];
+    if (entry && entry.mtime === file.stat.mtime) {
+      return entry.url;
+    }
+    return undefined;
+  }
+
+  private setCachedMediaUrl(file: TFile, url: string): void {
+    if (!this.plugin.settings.mediaUploadCache) {
+      this.plugin.settings.mediaUploadCache = {};
+    }
+    const cache = this.plugin.settings.mediaUploadCache;
+    // drop the whole cache when it grows too large
+    if (Object.keys(cache).length >= MEDIA_CACHE_MAX_ENTRIES) {
+      this.plugin.settings.mediaUploadCache = {};
+    }
+    cache[file.path] = { url, mtime: file.stat.mtime };
+    this.plugin.saveSettings();
   }
 
   async publishPost(defaultPostParams?: WordPressPostParams): Promise<WordPressClientResult<WordPressPublishResult>> {
@@ -256,20 +351,44 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       // read note title, content and matter data
       const title = file.basename;
       const { content, matter: matterData } = await processFile(file, this.plugin.app);
-      
+
+      // expand note embeds `![[note]]` into note contents
+      const expandResult = await expandNoteEmbeds(this.plugin.app, file, content);
+      if (expandResult.failed.length > 0) {
+        new Notice(this.plugin.i18n.t('warning_embedCycle', {
+          names: [ ...new Set(expandResult.failed) ].slice(0, 3).join(', ')
+        }), ERROR_NOTICE_TIMEOUT);
+      }
+
       // check if profile selected is matched to the one in note property,
       // if not, ask whether to update or not
-      await this.checkExistingProfile(matterData);
+      const useOldProfile = await this.checkExistingProfile(matterData);
+      if (useOldProfile) {
+        // the user wants to publish with the profile stored in the note,
+        // republish with that profile instead of the current one, otherwise
+        // the post id from another site would be used against this site
+        const oldProfile = this.plugin.settings.profiles.find(p => p.name === matterData.profileName);
+        if (oldProfile) {
+          const client = getWordPressClient(this.plugin, oldProfile);
+          if (client) {
+            return client.publishPost(defaultPostParams);
+          }
+        }
+        throw new Error(this.plugin.i18n.t('error_noSuchProfile', {
+          profileName: String(matterData.profileName)
+        }));
+      }
 
       // now we're preparing the publishing data
       let postParams: WordPressPostParams;
       let result: WordPressClientResult<WordPressPublishResult> | undefined;
       if (defaultPostParams) {
         postParams = this.readFromFrontMatter(title, matterData, defaultPostParams);
-        postParams.content = content;
+        postParams.content = expandResult.content;
         result = await this.tryToPublish({
           auth,
-          postParams
+          postParams,
+          sourceFile: file
         });
       } else {
         const categories = await this.getCategories(auth);
@@ -288,11 +407,12 @@ export abstract class AbstractWordPressClient implements WordPressClient {
             { items: postTypes, selected: selectedPostType },
             async (postParams: WordPressPostParams, updateMatterData: (matter: MatterData) => void) => {
               postParams = this.readFromFrontMatter(title, matterData, postParams);
-              postParams.content = content;
+              postParams.content = expandResult.content;
               try {
                 const r = await this.tryToPublish({
                   auth,
                   postParams,
+                  sourceFile: file,
                   updateMatterData
                 });
                 if (r.code === WordPressClientReturnCode.OK) {
@@ -360,62 +480,76 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     if (postParams.postType === PostTypeConst.Post) {
       // only 'post' supports categories and tags
       if (matterData.categories) {
-        postParams.categories = matterData.categories as number[] ?? this.profile.lastSelectedCategories;
+        postParams.categories = normalizeCategories(matterData.categories)
+          ?? this.profile.lastSelectedCategories;
       }
       if (matterData.tags) {
-        postParams.tags = matterData.tags as string[];
+        postParams.tags = normalizeTags(matterData.tags);
       }
+    }
+    if (matterData.excerpt && isString(matterData.excerpt)) {
+      postParams.excerpt = matterData.excerpt;
+    }
+    if (matterData.slug && isString(matterData.slug)) {
+      postParams.slug = matterData.slug;
+    }
+    if (matterData.date && isString(matterData.date)) {
+      postParams.date = matterData.date;
     }
     return postParams;
   }
 
 }
 
-interface Image {
-  original: string;
-  src: string;
-  altText?: string;
-  width?: string;
-  height?: string;
-  srcIsUrl: boolean;
-  startIndex: number;
-  endIndex: number;
-  file?: TFile;
-  content?: ArrayBuffer;
+const MEDIA_CACHE_MAX_ENTRIES = 1000;
+
+/**
+ * Normalizes the categories from the frontmatter into term ids.
+ *
+ * Returns `undefined` if the value cannot be normalized.
+ */
+function normalizeCategories(value: SafeAny): number[] | undefined {
+  const values = isArray(value) ? value : [ value ];
+  const result: number[] = [];
+  for (const it of values) {
+    const id = typeof it === 'number' ? it : Number(it);
+    if (Number.isFinite(id) && id > 0) {
+      result.push(id);
+    }
+  }
+  return result.length > 0 ? result : undefined;
 }
 
-function getImages(content: string): Image[] {
-  const paths: Image[] = [];
+/**
+ * Normalizes the tags from the frontmatter into tag names.
+ *
+ * Tags could be a string (`tag1, tag2`), a number or a list.
+ */
+function normalizeTags(value: SafeAny): string[] {
+  const values = isArray(value) ? value : isString(value) ? value.split(/[,\n]/) : [ value ];
+  return values
+    .map(it => String(it).trim())
+    .filter(it => it.length > 0);
+}
 
-  // for ![Alt Text](image-url)
-  let regex = /(!\[(.*?)(?:\|(\d+)(?:x(\d+))?)?]\((.*?)\))/g;
-  let match;
-  while ((match = regex.exec(content)) !== null) {
-    paths.push({
-      src: match[5],
-      altText: match[2],
-      width: match[3],
-      height: match[4],
-      original: match[1],
-      startIndex: match.index,
-      endIndex: match.index + match.length,
-      srcIsUrl: isValidUrl(match[5]),
-    });
+/**
+ * Builds the replacement of a media reference with the WordPress URL.
+ */
+function buildMediaReplacement(ref: MediaRef, file: TFile, url: string): string {
+  if (!isImageFile(file)) {
+    // non-image media files are linked instead of embedded
+    return `[${ref.altText ?? file.name}](${url})`;
   }
-
-  // for ![[image-name]]
-  regex = /(!\[\[(.*?)(?:\|(\d+)(?:x(\d+))?)?]])/g;
-  while ((match = regex.exec(content)) !== null) {
-    paths.push({
-      src: match[2],
-      original: match[1],
-      width: match[3],
-      height: match[4],
-      startIndex: match.index,
-      endIndex: match.index + match.length,
-      srcIsUrl: isValidUrl(match[2]),
-    });
+  if (ref.syntax === 'wiki') {
+    const suffix = ref.width
+      ? (ref.height ? `|${ref.width}x${ref.height}` : `|${ref.width}`)
+      : (ref.altText ? `|${ref.altText}` : '');
+    return `![[${url}${suffix}]]`;
   }
-
-  return paths;
+  // markdown syntax
+  if (ref.width) {
+    // markdown image syntax cannot express the size, use wiki syntax
+    return `![[${url}|${ref.height ? `${ref.width}x${ref.height}` : ref.width}]]`;
+  }
+  return `![${ref.altText ?? ''}](${url})`;
 }

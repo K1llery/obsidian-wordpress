@@ -115,15 +115,27 @@ export function showError<T>(error: unknown): WordPressClientResult<T> {
 }
 
 export async function processFile(file: TFile, app: App): Promise<{ content: string, matter: MatterData }> {
-  let fm = app.metadataCache.getFileCache(file)?.frontmatter;
-  if (!fm) {
-    await app.fileManager.processFrontMatter(file, matter => {
-      fm = matter
-    });
-  }
+  // only read the frontmatter from the metadata cache, never
+  // create or modify the frontmatter of the note
+  const fm = app.metadataCache.getFileCache(file)?.frontmatter;
   const raw = await app.vault.read(file);
   return {
-    content: raw.replace(/^---[\s\S]+?---/, '').trim(),
+    content: stripFrontmatter(raw),
     matter: fm ?? {}
   };
+}
+
+/**
+ * Strips the YAML frontmatter from the raw note content.
+ * Returns the content as-is if it does not start with a frontmatter block.
+ */
+export function stripFrontmatter(raw: string): string {
+  if (!raw.startsWith('---')) {
+    return raw.trim();
+  }
+  const match = raw.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
+  if (!match) {
+    return raw.trim();
+  }
+  return raw.substring(match[0].length).trim();
 }

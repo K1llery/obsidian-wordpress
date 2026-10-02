@@ -74,6 +74,12 @@ export interface WordpressPluginSettings {
    * Whether media links should be replaced after uploading to WordPress.
    */
   replaceMediaLinks: boolean;
+
+  /**
+   * Cache of uploaded media, keyed by the vault file path.
+   * Used to avoid uploading the same file again on re-publishing.
+   */
+  mediaUploadCache?: Record<string, { url: string, mtime: number }>;
 }
 
 export const DEFAULT_SETTINGS: WordpressPluginSettings = {
@@ -87,14 +93,13 @@ export const DEFAULT_SETTINGS: WordpressPluginSettings = {
   mathJaxOutputType: MathJaxOutputType.SVG,
   commentConvertMode: CommentConvertMode.Ignore,
   enableHtml: false,
-  replaceMediaLinks: true,
+  replaceMediaLinks: false,
 }
 
 export async function upgradeSettings(
   existingSettings: SafeAny,
   to: SettingsVersion
 ): Promise<{ needUpgrade: boolean, settings: WordpressPluginSettings }> {
-  console.log(existingSettings, to);
   if (isUndefined(existingSettings.version)) {
     // V1
     if (to === SettingsVersion.V2) {
