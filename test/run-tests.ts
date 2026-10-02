@@ -516,6 +516,37 @@ async function main(): Promise<void> {
     assertEqual(result.content, source);
   });
 
+  await test('rendered SVG is flattened to a single line (wpautop-safe)', async () => {
+    const result = await renderMermaidDiagrams(
+      '```mermaid\ngraph TD\nA-->B\n```',
+      async () => '<svg>\n<style>.a{color:#333}\n.fill{x:1}</style>\n<g>\n<text>A</text>\n</g>\n</svg>'
+    );
+    assertEqual(result.rendered, 1);
+    const fence = result.content.match(/```ob-mermaid\n([^\n]+)\n```/);
+    if (!fence) {
+      throw new Error(`placeholder fence missing: ${result.content}`);
+    }
+    const svg = MarkdownItMermaidPluginInstance.consumeSvg(fence[1]);
+    if (svg === undefined) {
+      throw new Error('svg not stored for the placeholder');
+    }
+    if (svg.includes('\n')) {
+      throw new Error(`svg still contains newlines: ${svg.slice(0, 120)}`);
+    }
+    assertIncludes(svg, '<text>A</text>');
+  });
+
+  await test('resolver prefers in-memory published links over the stale cache', () => {
+    const files: Record<string, string> = { 'target.md': 'content' };
+    const app = createFakeApp(files, {
+      // frontmatter without postLink yet (cache not re-indexed)
+      'target.md': { profileName: 'Blog' },
+    });
+    const publishedLinks = new Map([ ['target.md', 'https://example.com/fresh/'] ]);
+    const resolver = createWikiLinkResolver(app as never, { name: 'Blog' } as never, new TFile('main.md'), publishedLinks);
+    assertEqual(resolver('target')?.permalink, 'https://example.com/fresh/');
+  });
+
   console.log('linked note targets:');
 
   await test('collects wikilink targets without embeds, code and aliases', () => {

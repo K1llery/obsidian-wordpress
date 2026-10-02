@@ -145,9 +145,10 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     postParams: WordPressPostParams,
     auth: WordPressAuthParams,
     sourceFile: TFile,
+    publishedLinks?: Map<string, string>,
     updateMatterData?: (matter: MatterData) => void,
   }): Promise<WordPressClientResult<WordPressPublishResult>> {
-    const { postParams, auth, sourceFile, updateMatterData } = params;
+    const { postParams, auth, sourceFile, publishedLinks, updateMatterData } = params;
     const tagTerms = await this.getTags(postParams.tags, auth);
     postParams.tags = tagTerms.map(term => term.id);
     await this.updatePostImages({
@@ -158,7 +159,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     // links to other published notes are converted to their permalinks
     MarkdownItWikiLinkPluginInstance.resetUnresolved();
     MarkdownItWikiLinkPluginInstance.setResolver(
-      createWikiLinkResolver(this.plugin.app, this.profile, sourceFile)
+      createWikiLinkResolver(this.plugin.app, this.profile, sourceFile, publishedLinks)
     );
     // mermaid diagrams are rendered to inline SVG before the synchronous
     // markdown pass, so the post is self-contained
@@ -373,9 +374,10 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       defaultPostParams?: WordPressPostParams,
       auto?: boolean,
       visited?: Set<string>,
+      publishedLinks?: Map<string, string>,
     } = {}
   ): Promise<WordPressClientResult<WordPressPublishResult>> {
-    const { defaultPostParams, auto = false } = options;
+    const { defaultPostParams, auto = false, publishedLinks = options.publishedLinks ?? new Map<string, string>() } = options;
     const visited = options.visited ?? new Set<string>();
     visited.add(file.path);
     try {
@@ -421,7 +423,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
 
       // publish notes referenced by wikilinks before this note, so that
       // the links can resolve to their permalinks
-      await this.autoPublishLinkedNotes(file, expandResult.content, visited);
+      await this.autoPublishLinkedNotes(file, expandResult.content, visited, publishedLinks);
 
       // now we're preparing the publishing data
       let postParams: WordPressPostParams;
@@ -432,7 +434,8 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         result = await this.tryToPublish({
           auth,
           postParams,
-          sourceFile: file
+          sourceFile: file,
+          publishedLinks
         });
       } else {
         const categories = await this.getCategories(auth);
@@ -457,6 +460,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
                   auth,
                   postParams,
                   sourceFile: file,
+                  publishedLinks,
                   updateMatterData
                 });
                 if (r.code === WordPressClientReturnCode.OK) {
@@ -498,7 +502,8 @@ export abstract class AbstractWordPressClient implements WordPressClient {
   private async autoPublishLinkedNotes(
     sourceFile: TFile,
     content: string,
-    visited: Set<string>
+    visited: Set<string>,
+    publishedLinks: Map<string, string>
   ): Promise<void> {
     if (!this.plugin.settings.autoPublishLinkedNotes) {
       return;
@@ -526,7 +531,12 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         name: dest.basename
       }), ERROR_NOTICE_TIMEOUT);
       try {
-        await this.publishFile(dest, { auto: true, visited });
+        const r = await this.publishFile(dest, { auto: true, visited, publishedLinks });
+        if (r.code === WordPressClientReturnCode.OK && r.data.link) {
+          // remember the permalink in memory: the metadata cache may not
+          // have picked up the freshly written frontmatter yet
+          publishedLinks.set(dest.path, r.data.link);
+        }
       } catch (error) {
         // a failed linked note does not block publishing the current one
         showError(error);

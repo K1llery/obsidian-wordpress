@@ -409,11 +409,16 @@ export async function expandNoteEmbeds(
  * A wikilink is converted to a permalink when its target note has been
  * published with the same profile. Unpublished targets are rendered
  * as plain text.
+ *
+ * @param publishedLinks in-memory permalinks of notes published during
+ * the same run, used because the metadata cache may not have picked up
+ * the freshly written frontmatter yet.
  */
 export function createWikiLinkResolver(
   app: App,
   profile: WpProfile,
-  sourceFile: TFile
+  sourceFile: TFile,
+  publishedLinks?: Map<string, string>
 ): (linkpath: string) => WikiLinkResolution | undefined {
   return (linkpath: string): WikiLinkResolution | undefined => {
     const hashIndex = linkpath.indexOf('#');
@@ -423,6 +428,10 @@ export function createWikiLinkResolver(
     const dest = app.metadataCache.getFirstLinkpathDest(path, sourceFile.path);
     if (!dest) {
       return { exists: false, subpath };
+    }
+    const override = publishedLinks?.get(dest.path);
+    if (override) {
+      return { exists: true, permalink: override, subpath };
     }
     const frontmatter: SafeAny = app.metadataCache.getFileCache(dest)?.frontmatter;
     const permalink = typeof frontmatter?.postLink === 'string' ? frontmatter.postLink : undefined;

@@ -152,7 +152,11 @@ export async function renderMermaidDiagrams(
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i];
     try {
-      const svg = await withTimeout(render(block.code), RENDER_TIMEOUT_MS);
+      const rawSvg = await withTimeout(render(block.code), RENDER_TIMEOUT_MS);
+      // WordPress's wpautop filter inserts <p>/<br /> at line breaks when
+      // rendering the content, which would tear the SVG apart. A single-line
+      // SVG leaves wpautop nothing to work with.
+      const svg = rawSvg.replace(/\r?\n/g, '');
       const placeholder = `ob-mermaid-${++counter}`;
       MarkdownItMermaidPluginInstance.setSvg(placeholder, svg);
       lines.splice(block.startLine, block.endLine - block.startLine + 1, '```ob-mermaid', placeholder, '```');

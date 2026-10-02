@@ -138,6 +138,15 @@ Posts which use callouts, task lists, highlights, footnotes or
 highlighted code get a small stylesheet embedded into the post content,
 so they look right with any WordPress theme without extra plugins.
 
+## Linked notes
+
+When the `Auto publish linked notes` setting is on (default), notes
+referenced by wikilinks in the current note which have not been
+published yet are published first — with the default publish options,
+recursively and cycle-safe. The wikilinks then resolve to the
+permalinks of the freshly published notes. Notes which already have a
+`postId` in their frontmatter are not published again.
+
 ## Media files and attachments
 
 Local images and other media files referenced by a note are uploaded to the
