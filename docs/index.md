@@ -123,12 +123,20 @@ The following Obsidian syntax is converted while publishing:
 * **Task lists** `- [ ]` / `- [x]`: rendered as HTML checkboxes.
 * **Highlights** `==text==`: rendered as `<mark>text</mark>`.
 * **Footnotes** `[^1]`: rendered as HTML footnotes.
-* **Mermaid** diagrams: ``` ```mermaid ``` fences are rendered as
-  `<pre class="mermaid">` blocks which can be rendered by a WordPress mermaid
-  plugin, e.g. [WP Mermaid](https://wordpress.org/plugins/wp-mermaid/).
+* **Code blocks**: highlighted at publish time with highlight.js
+  (common languages bundled). The matching stylesheet is embedded into
+  the post, so no WordPress plugin is needed.
+* **Mermaid** diagrams: rendered to standalone SVG at publish time and
+  embedded into the post, so they display without any WordPress-side
+  mermaid plugin. Diagrams which fail to render keep their original
+  code fence.
 * **Comments** `%%...%%`: single-line and multi-line comment blocks are supported.
 * **Math** `$...$` and `$$...$$`: rendered as SVG or TeX depending on the
   MathJax output format setting.
+
+Posts which use callouts, task lists, highlights, footnotes or
+highlighted code get a small stylesheet embedded into the post content,
+so they look right with any WordPress theme without extra plugins.
 
 ## Media files and attachments
 

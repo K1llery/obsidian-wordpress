@@ -16,6 +16,7 @@ import { MarkdownItMathJax3PluginInstance } from '../src/markdown-it-mathjax3-pl
 import { MathJaxOutputType } from '../src/plugin-settings';
 import { expandNoteEmbeds, getMediaRefs, isImageFile, decodeMediaSrc, MediaRef } from '../src/publish-converters';
 import { stripFrontmatter } from '../src/utils';
+import { ensureEmbeddedStyles } from '../src/embedded-styles';
 
 const folder = process.argv[2] ?? 'D:/mynotes/WordPress发布测试';
 const notePath = process.argv[3] ?? path.join(folder, 'WordPress全语法发布测试.md');
@@ -109,7 +110,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const html = AppState.markdownParser.render(content);
+  const html = ensureEmbeddedStyles(AppState.markdownParser.render(content));
   const page = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -142,7 +143,7 @@ async function main(): Promise<void> {
 </head>
 <body>
 <div class="banner">
-  这是用插件同一套转换代码在本地生成的<strong>预期效果</strong>（图片指向本地副本，WordPress 上会指向站点媒体库 URL；站点视觉样式由你的 WordPress 主题决定）。发布后请与本页对照。
+  这是用插件同一套转换代码在本地生成的<strong>预期效果</strong>（图片指向本地副本，WordPress 上会指向站点媒体库 URL；站点视觉样式由你的 WordPress 主题决定）。代码高亮与发布效果一致；Mermaid 图在发布时会渲染为内嵌 SVG，本预览中显示为源代码。
 </div>
 ${html}
 <script>void 0</script>

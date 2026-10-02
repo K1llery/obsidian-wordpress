@@ -20,6 +20,7 @@
   "warning_unresolvedLinks": "The following links could not be resolved to published posts: <%= links %>",
   "warning_mediaNotFound": "Media file <%= name %> not found in the vault, please check the link.",
   "warning_embedCycle": "The following note embeds are cyclic or exceed the nesting limit, skipped: <%= names %>",
+  "warning_mermaidRenderFailed": "<%= count %> mermaid diagram(s) failed to render; the original code is kept.",
   "settings_clearMediaCache": "Clear media upload cache",
   "settings_clearMediaCacheDesc": "The plugin remembers uploaded media files to avoid uploading them again. Clear the cache to force re-uploading if the WordPress media library has been cleaned up manually.",
   "settings_clearMediaCacheButtonText": "Clear",

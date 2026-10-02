@@ -8,6 +8,9 @@ import { MarkdownItCalloutPluginInstance } from '../src/markdown-it-callout-plug
 import { MarkdownItTaskListPluginInstance } from '../src/markdown-it-tasklist-plugin';
 import { MarkdownItHighlightPluginInstance } from '../src/markdown-it-highlight-plugin';
 import { MarkdownItMermaidPluginInstance } from '../src/markdown-it-mermaid-plugin';
+import { CodeHighlightPluginInstance } from '../src/code-highlight';
+import { ensureEmbeddedStyles } from '../src/embedded-styles';
+import { renderMermaidDiagrams } from '../src/mermaid-renderer';
 import {
   createWikiLinkResolver,
   expandNoteEmbeds,
@@ -55,6 +58,7 @@ function createParser(): MarkdownIt {
     .use(MarkdownItCalloutPluginInstance.plugin)
     .use(MarkdownItTaskListPluginInstance.plugin)
     .use(MarkdownItHighlightPluginInstance.plugin)
+    .use(CodeHighlightPluginInstance.plugin)
     .use(MarkdownItMermaidPluginInstance.plugin)
     .use(footnote);
   return md;
@@ -426,6 +430,89 @@ async function main(): Promise<void> {
     assertEqual(mimeTypeFor(new TFile('a.mp4')), 'video/mp4');
     assertEqual(mimeTypeFor(new TFile('a.pdf')), 'application/pdf');
     assertEqual(mimeTypeFor(new TFile('a.weird')), 'application/octet-stream');
+  });
+
+  console.log('publish-time rendering:');
+
+  await test('code fences are highlighted with hljs classes', () => {
+    const md = createParser();
+    const html = md.render('```ts\nconst a = 1;\n```\n');
+    assertIncludes(html, 'hljs-keyword');
+    assertIncludes(html, 'language-ts');
+  });
+
+  await test('unknown languages stay plain escaped code', () => {
+    const md = createParser();
+    const html = md.render('```weirdlang\na < b\n```\n');
+    if (html.includes('hljs-')) {
+      throw new Error(`unexpected highlighting: ${html}`);
+    }
+    assertIncludes(html, 'a &lt; b');
+  });
+
+  await test('embedded styles are injected when the post needs them', () => {
+    const md = createParser();
+    const withCode = md.render('```ts\nconst a = 1;\n```\n');
+    assertIncludes(ensureEmbeddedStyles(withCode), '<style>');
+    const withCallout = md.render('> [!note] T\n> c\n');
+    assertIncludes(ensureEmbeddedStyles(withCallout), 'data-callout="note"');
+    assertEqual(ensureEmbeddedStyles('<p>plain text</p>'), '<p>plain text</p>');
+  });
+
+  await test('mermaid fences are replaced with inline SVG at publish time', async () => {
+    const md = createParser();
+    const source = 'before\n\n```mermaid\ngraph TD\nA-->B\n```\n\nafter';
+    const result = await renderMermaidDiagrams(source, async () => '<svg>fake-diagram</svg>');
+    assertEqual(result.failed, []);
+    const html = md.render(result.content);
+    assertIncludes(html, '<svg>fake-diagram</svg>');
+    if (html.includes('```')) {
+      throw new Error(`fence leaked: ${html}`);
+    }
+  });
+
+  await test('each mermaid block gets its own rendered SVG', async () => {
+    const md = createParser();
+    const source = '```mermaid\nA\n```\n\n```mermaid\nB\n```';
+    let calls = 0;
+    const result = await renderMermaidDiagrams(source, async (code) => {
+      calls++;
+      return `<svg>${code.trim()}</svg>`;
+    });
+    assertEqual(calls, 2);
+    const html = md.render(result.content);
+    assertIncludes(html, '<svg>A</svg>');
+    assertIncludes(html, '<svg>B</svg>');
+  });
+
+  await test('failed mermaid renders keep the original fence', async () => {
+    const md = createParser();
+    const source = '```mermaid\ngraph TD\nA-->B\n```';
+    const result = await renderMermaidDiagrams(source, async () => {
+      throw new Error('syntax error');
+    });
+    assertEqual(result.failed.length, 1);
+    const html = md.render(result.content);
+    assertIncludes(html, '<pre class="mermaid">');
+    assertIncludes(html, 'graph TD');
+  });
+
+  await test('tilde fences and unterminated fences are handled', async () => {
+    const result = await renderMermaidDiagrams(
+      '~~~mermaid\nA\n~~~\n\n```mermaid\nB\n',
+      async () => '<svg/>'
+    );
+    // only the terminated tilde block is rendered; the unterminated one is left alone
+    assertEqual(result.failed, []);
+    const placeholderCount = (result.content.match(/```ob-mermaid/g) ?? []).length;
+    assertEqual(placeholderCount, 1);
+    assertIncludes(result.content, '```mermaid');
+  });
+
+  await test('content without mermaid fences is untouched', async () => {
+    const source = 'plain\n\n```ts\nconst a = 1;\n```\n';
+    const result = await renderMermaidDiagrams(source, async () => '<svg/>');
+    assertEqual(result.content, source);
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

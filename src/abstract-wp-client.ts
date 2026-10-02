@@ -22,6 +22,8 @@ import { openPostPublishedModal } from './post-published-modal';
 import { openLoginModal } from './wp-login-modal';
 import { isFunction, isArray, isString } from 'lodash-es';
 import { MarkdownItWikiLinkPluginInstance } from './markdown-it-wikilink-plugin';
+import { renderMermaidDiagrams } from './mermaid-renderer';
+import { ensureEmbeddedStyles } from './embedded-styles';
 import {
   createWikiLinkResolver,
   decodeMediaSrc,
@@ -157,7 +159,16 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     MarkdownItWikiLinkPluginInstance.setResolver(
       createWikiLinkResolver(this.plugin.app, this.profile, sourceFile)
     );
-    const html = AppState.markdownParser.render(postParams.content);
+    // mermaid diagrams are rendered to inline SVG before the synchronous
+    // markdown pass, so the post is self-contained
+    const mermaidResult = await renderMermaidDiagrams(postParams.content);
+    postParams.content = mermaidResult.content;
+    if (mermaidResult.failed.length > 0) {
+      new Notice(this.plugin.i18n.t('warning_mermaidRenderFailed', {
+        count: String(mermaidResult.failed.length)
+      }), ERROR_NOTICE_TIMEOUT);
+    }
+    const html = ensureEmbeddedStyles(AppState.markdownParser.render(postParams.content));
     this.showUnresolvedLinks();
     const result = await this.publish(
       postParams.title ?? 'A post from Obsidian!',
