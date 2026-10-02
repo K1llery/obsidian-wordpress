@@ -79,13 +79,17 @@ export class Setting {
 }
 
 export class Modal {
+  static openHook?: (modal: Modal) => void;
+  contentEl = {empty() {}};
   constructor(public app?: unknown) {
   }
 
   open(): void {
+    Modal.openHook?.(this);
   }
 
   close(): void {
+    this.onClose();
   }
 
   onOpen(): void {
@@ -111,7 +115,13 @@ export function normalizePath(path: string): string {
   return path.replace(/\/+/g, '/');
 }
 
-export function requestUrl(): unknown {
+let requestUrlHandler: ((request: unknown) => unknown) | undefined;
+export function setRequestUrlHandler(handler?: (request: unknown) => unknown): void {
+  requestUrlHandler = handler;
+}
+
+export function requestUrl(request: unknown): unknown {
+  if (requestUrlHandler) return requestUrlHandler(request);
   throw new Error('not implemented in tests');
 }
 

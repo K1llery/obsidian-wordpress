@@ -3,7 +3,6 @@ import { WpProfile } from './wp-profile';
 import { WordpressPluginSettings } from './plugin-settings';
 import { MarkdownItMathJax3PluginInstance } from './markdown-it-mathjax3-plugin';
 import { WordPressClientResult, WordPressClientReturnCode, WordPressPostParams } from './wp-client';
-import { getWordPressClient } from './wp-clients';
 import WordpressPlugin from './main';
 import { isString } from 'lodash-es';
 import { ERROR_NOTICE_TIMEOUT } from './consts';
@@ -78,10 +77,11 @@ export function doClientPublish(
     profile = profileOrName;
   }
   if (profile) {
-    const client = getWordPressClient(plugin, profile);
-    if (client) {
-      client.publishPost(defaultPostParams).then();
-    }
+    const selectedProfile = profile;
+    import('./wp-clients').then(({getWordPressClient}) => {
+      const client = getWordPressClient(plugin, selectedProfile);
+      if (client) return client.publishPost(defaultPostParams);
+    }).catch(showError);
   } else {
     const noSuchProfileMessage = plugin.i18n.t('error_noSuchProfile', {
       profileName: String(profileOrName)
@@ -121,7 +121,7 @@ export async function processFile(file: TFile, app: App): Promise<{ content: str
   const raw = await app.vault.read(file);
   return {
     content: stripFrontmatter(raw),
-    matter: fm ?? {}
+    matter: { ...fm }
   };
 }
 

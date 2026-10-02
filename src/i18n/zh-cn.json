@@ -1,4 +1,5 @@
 {
+  "message_publishCancelled": "已取消发布。",
   "error_noEndpoint": "没有设置 WordPress URL",
   "error_notWpCom": "不是合法的 wordpress.com 地址，请检查",
   "error_noUsername": "没有设置用户名",

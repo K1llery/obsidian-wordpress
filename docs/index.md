@@ -127,7 +127,8 @@ The following Obsidian syntax is converted while publishing:
   (common languages bundled). The matching stylesheet is embedded into
   the post, so no WordPress plugin is needed.
 * **Mermaid** diagrams: rendered to standalone SVG at publish time and
-  embedded into the post, so they display without any WordPress-side
+  embedded in a protected container which prevents WordPress's automatic
+  paragraph formatting from damaging the diagram. They display without any WordPress-side
   mermaid plugin. Diagrams which fail to render keep their original
   code fence.
 * **Comments** `%%...%%`: single-line and multi-line comment blocks are supported.
@@ -140,12 +141,20 @@ so they look right with any WordPress theme without extra plugins.
 
 ## Linked notes
 
-When the `Auto publish linked notes` setting is on (default), notes
+When the `Auto publish linked notes` setting is enabled (off by default), notes
 referenced by wikilinks in the current note which have not been
 published yet are published first — with the default publish options,
 recursively and cycle-safe. The wikilinks then resolve to the
 permalinks of the freshly published notes. Notes which already have a
-`postId` in their frontmatter are not published again.
+`postId` in their frontmatter are not published again. Linked notes are only
+published after submitting the main note's publish dialog; cancelling the
+dialog does not publish them. Links in comments, escaped text and code are ignored.
+
+Heading and block links have corresponding anchors in the generated HTML.
+Embedded notes retain their own directory for resolving images and links.
+Missing sections, cyclic embeds and embeds beyond the depth limit produce a
+warning and a text placeholder; they never expand to the whole note or upload
+the original Markdown file as an attachment.
 
 ## Media files and attachments
 
@@ -157,13 +166,26 @@ uploaded URLs. Both Obsidian wiki embeds (`![[image.png]]`,
 note are resolved correctly. Non-image attachments such as PDFs are uploaded
 and linked.
 
-Uploaded media files are remembered, so publishing the same note again does
+Uploaded media files are remembered separately for each site/account, so publishing the same note again does
 not upload the same files again. The cache can be cleared with the
 `Clear media upload cache` button in the plugin settings.
 
 **Replace media links**: if enabled, the media links in the note itself are
 replaced with the WordPress URLs after uploading. It is disabled by default
 since the uploaded files are remembered anyway.
+
+The profile's remember username/password switches control what is saved on
+disk. Credentials entered with those switches off remain in memory only.
+
+## Development
+
+Use Node.js 22.12 or later, then run `npm ci`, `npm test` and `npm run build`.
+The tests exercise both Markdown conversion and publication regressions with
+mocked Obsidian/WordPress interfaces.
+
+For real browser rendering, run `npm run test:browser:build` and open
+`test/.out/mermaid-browser-test.html` in a browser. It checks actual Mermaid
+SVG generation, re-rendering, syntax-error fallback and timeout cleanup.
 
 ## Frontmatter properties
 

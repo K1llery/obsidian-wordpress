@@ -18,9 +18,13 @@ import { expandNoteEmbeds, getMediaRefs, isImageFile, decodeMediaSrc, MediaRef }
 import { stripFrontmatter } from '../src/utils';
 import { ensureEmbeddedStyles } from '../src/embedded-styles';
 
-const folder = process.argv[2] ?? 'D:/mynotes/WordPress发布测试';
-const notePath = process.argv[3] ?? path.join(folder, 'WordPress全语法发布测试.md');
-const outPath = process.argv[4] ?? path.join(folder, '预期效果预览.html');
+const folder = process.argv[2];
+const notePath = process.argv[3];
+if (!folder || !notePath) {
+  console.error('Usage: preview <vault-folder> <note-path> [output-html-path]');
+  process.exit(1);
+}
+const outPath = process.argv[4] ?? path.join(folder, 'preview.html');
 
 function listFiles(dir: string): string[] {
   const result: string[] = [];

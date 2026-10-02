@@ -1,6 +1,4 @@
-import { MarkdownItMermaidPluginInstance } from './markdown-it-mermaid-plugin';
-
-export type MermaidSvgRenderer = (code: string) => Promise<string>;
+export type MermaidSvgRenderer = (code: string, signal?: AbortSignal) => Promise<string>;
 
 let counter = 0;
 
@@ -20,30 +18,44 @@ const RENDER_TIMEOUT_MS = 15000;
 
 async function getDefaultRenderer(): Promise<MermaidSvgRenderer> {
   if (defaultRenderer === null) {
-    defaultRenderer = async (code: string): Promise<string> => {
+    defaultRenderer = async (code: string, signal?: AbortSignal): Promise<string> => {
       if (typeof document === 'undefined') {
         throw new Error('Mermaid rendering requires a DOM environment.');
       }
       const { default: mermaid } = await import('mermaid');
+      if (signal?.aborted) throw new Error('Mermaid rendering cancelled.');
       mermaid.initialize({
         startOnLoad: false,
         securityLevel: 'strict',
         theme: 'default',
-        // pure SVG text labels instead of foreignObject HTML labels,
-        // which survive WordPress sanitization much better
-        flowchart: { htmlLabels: false },
-        class: { htmlLabels: false },
+        // Mermaid 12 gives this global option precedence over the deprecated
+        // flowchart.htmlLabels setting. Use SVG text labels for portability.
+        htmlLabels: false,
+        suppressErrorRendering: true,
       });
-      const { svg } = await mermaid.render(`ob-mermaid-svg-${++counter}`, code);
-      return svg;
+      const container = document.createElement('div');
+      container.style.cssText = 'position:absolute;left:-10000px;top:0;';
+      document.body.appendChild(container);
+      const cleanup = () => container.remove();
+      signal?.addEventListener('abort', cleanup, {once:true});
+      try {
+        const { svg } = await mermaid.render(`ob-mermaid-svg-${++counter}`, code, container);
+        return svg;
+      } finally {
+        signal?.removeEventListener('abort', cleanup);
+        cleanup();
+      }
     };
   }
   return defaultRenderer;
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`render timed out after ${ms}ms`)), ms);
+    const timer = setTimeout(() => {
+      onTimeout();
+      reject(new Error(`render timed out after ${ms}ms`));
+    }, ms);
     promise.then(
       value => {
         clearTimeout(timer);
@@ -111,6 +123,7 @@ export function findMermaidFences(content: string): MermaidFenceBlock[] {
 
 export interface MermaidRenderResult {
   content: string;
+  svgs: Map<string, string>;
 
   /**
    * Number of diagrams successfully rendered to SVG.
@@ -136,12 +149,12 @@ export async function renderMermaidDiagrams(
   renderSvg?: MermaidSvgRenderer
 ): Promise<MermaidRenderResult> {
   const blocks = findMermaidFences(content);
+  const svgs = new Map<string, string>();
   if (blocks.length === 0) {
-    return { content, rendered: 0, failed: [] };
+    return { content, svgs, rendered: 0, failed: [] };
   }
 
   const render = renderSvg ?? await getDefaultRenderer();
-  MarkdownItMermaidPluginInstance.clearSvgs();
 
   const eol = content.includes('\r\n') ? '\r\n' : '\n';
   const lines = content.split(/\r?\n/);
@@ -151,14 +164,14 @@ export async function renderMermaidDiagrams(
   // replace from the last block to keep the earlier line indices valid
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i];
+    const controller = new AbortController();
     try {
-      const rawSvg = await withTimeout(render(block.code), RENDER_TIMEOUT_MS);
-      // WordPress's wpautop filter inserts <p>/<br /> at line breaks when
-      // rendering the content, which would tear the SVG apart. A single-line
-      // SVG leaves wpautop nothing to work with.
+      const rawSvg = await withTimeout(render(block.code, controller.signal), RENDER_TIMEOUT_MS, () => controller.abort());
+      // Keep the payload compact. The fence renderer also wraps it in pre:
+      // single-line SVG alone cannot prevent wpautop splitting style tags.
       const svg = rawSvg.replace(/\r?\n/g, '');
       const placeholder = `ob-mermaid-${++counter}`;
-      MarkdownItMermaidPluginInstance.setSvg(placeholder, svg);
+      svgs.set(placeholder, svg);
       lines.splice(block.startLine, block.endLine - block.startLine + 1, '```ob-mermaid', placeholder, '```');
       rendered++;
     } catch {
@@ -166,5 +179,5 @@ export async function renderMermaidDiagrams(
     }
   }
 
-  return { content: lines.join(eol), rendered, failed };
+  return { content: lines.join(eol), svgs, rendered, failed };
 }

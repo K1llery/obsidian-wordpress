@@ -3,6 +3,7 @@ import fileTypeChecker from 'file-type-checker';
 import { SafeAny, stripFrontmatter } from './utils';
 import { WpProfile } from './wp-profile';
 import { WikiLinkResolution } from './markdown-it-wikilink-plugin';
+import MarkdownIt from 'markdown-it';
 
 /**
  * The maximum depth of nested note embeds (`![[note]]`).
@@ -57,6 +58,8 @@ const MIME_BY_EXTENSION: Record<string, string> = {
  * `![alt|100x200](<path> "title")`.
  */
 export interface MediaRef {
+  start: number;
+  end: number;
   /**
    * The original text of the whole reference.
    */
@@ -87,34 +90,72 @@ const WIKI_EMBED_RE = /!\[\[([^|\]\n]+)(?:\|([^\]\n]+))?\]\]/g;
  */
 export function findCodeRanges(content: string): Array<[ number, number ]> {
   const ranges: Array<[ number, number ]> = [];
-
-  // fenced code blocks (``` or ~~~)
-  const fenceRe = /(?:^|\n)[ \t]*(`{3,}|~{3,})[^\n]*/g;
-  let open: { start: number, mark: string } | null = null;
-  let match: RegExpExecArray | null;
-  while ((match = fenceRe.exec(content)) !== null) {
-    const lineStart = match.index + (match[0].startsWith('\n') ? 1 : 0);
-    const mark = match[1];
-    if (open === null) {
-      open = { start: lineStart, mark };
-    } else if (mark[0] === open.mark[0] && mark.length >= open.mark.length) {
-      ranges.push([ open.start, match.index + match[0].length ]);
-      open = null;
+  const lineStarts = [0];
+  for (let i = 0; i < content.length; i++) {
+    if (content[i] === '\n') lineStarts.push(i + 1);
+  }
+  // Let CommonMark identify fences inside lists/quotes and indented code.
+  const tokens = new MarkdownIt().parse(content, {});
+  for (const token of tokens) {
+    if ((token.type === 'fence' || token.type === 'code_block') && token.map) {
+      ranges.push([lineStarts[token.map[0]], lineStarts[token.map[1]] ?? content.length]);
     }
   }
-  if (open !== null) {
-    ranges.push([ open.start, content.length ]);
-  }
-
-  // inline code spans, only outside of fenced blocks
-  const inlineRe = /`+[^`\n]*`+/g;
-  while ((match = inlineRe.exec(content)) !== null) {
-    if (ranges.some(([ start, end ]) => match!.index >= start && match!.index < end)) {
-      continue;
+  // Code spans can contain newlines and shorter backtick runs.
+  for (const token of tokens) {
+    if (token.type !== 'inline' || !token.map) continue;
+    const regionEnd = lineStarts[token.map[1]] ?? content.length;
+    const ticks = /`+/g;
+    ticks.lastIndex = lineStarts[token.map[0]];
+    let match: RegExpExecArray | null;
+    while ((match = ticks.exec(content)) !== null && match.index < regionEnd) {
+      if (inRanges(match.index, ranges) || isEscaped(content, match.index)) continue;
+      const close = /`+/g;
+      close.lastIndex = ticks.lastIndex;
+      let end: RegExpExecArray | null;
+      while ((end = close.exec(content)) !== null && end.index < regionEnd) {
+        if (inRanges(end.index, ranges)) break;
+        if (end[0].length === match[0].length) {
+          ranges.push([match.index, close.lastIndex]);
+          ticks.lastIndex = close.lastIndex;
+          break;
+        }
+      }
     }
-    ranges.push([ match.index, match.index + match[0].length ]);
   }
   return ranges;
+}
+
+function isEscaped(content: string, index: number): boolean {
+  let slashes = 0;
+  while (index > 0 && content[--index] === '\\') slashes++;
+  return slashes % 2 === 1;
+}
+
+function findExcludedRanges(content: string): Array<[number, number]> {
+  const ranges = findCodeRanges(content);
+  const comments = /%%/g;
+  let open: number | undefined;
+  let match: RegExpExecArray | null;
+  while ((match = comments.exec(content)) !== null) {
+    if (open !== undefined) {
+      ranges.push([open, comments.lastIndex]);
+      open = undefined;
+    } else if (!inRanges(match.index, ranges) && !isEscaped(content, match.index)) {
+      open = match.index;
+    }
+  }
+  if (open !== undefined && /^\s*%%/.test(content.slice(content.lastIndexOf('\n', open - 1) + 1, open + 2))) {
+    ranges.push([open, content.length]);
+  }
+  return ranges;
+}
+
+export function replaceContentRanges(content: string, replacements: Array<{start: number, end: number, replacement: string}>): string {
+  for (const {start, end, replacement} of [...replacements].sort((a, b) => b.start - a.start)) {
+    content = content.slice(0, start) + replacement + content.slice(end);
+  }
+  return content;
 }
 
 function inRanges(index: number, ranges: Array<[ number, number ]>): boolean {
@@ -127,12 +168,12 @@ function inRanges(index: number, ranges: Array<[ number, number ]>): boolean {
  */
 export function getMediaRefs(content: string): MediaRef[] {
   const refs: MediaRef[] = [];
-  const codeRanges = findCodeRanges(content);
+  const codeRanges = findExcludedRanges(content);
 
   let match: RegExpExecArray | null;
   MARKDOWN_IMAGE_RE.lastIndex = 0;
   while ((match = MARKDOWN_IMAGE_RE.exec(content)) !== null) {
-    if (inRanges(match.index, codeRanges)) {
+    if (inRanges(match.index, codeRanges) || isEscaped(content, match.index)) {
       continue;
     }
     // match groups: 1 = alt, 2 = braced path, 3 = bare path, 4 = title
@@ -155,6 +196,8 @@ export function getMediaRefs(content: string): MediaRef[] {
       }
     }
     refs.push({
+      start: match.index,
+      end: match.index + match[0].length,
       original: match[0],
       src,
       altText: altText?.length ? altText : undefined,
@@ -167,7 +210,7 @@ export function getMediaRefs(content: string): MediaRef[] {
 
   WIKI_EMBED_RE.lastIndex = 0;
   while ((match = WIKI_EMBED_RE.exec(content)) !== null) {
-    if (inRanges(match.index, codeRanges)) {
+    if (inRanges(match.index, codeRanges) || isEscaped(content, match.index)) {
       continue;
     }
     const src = match[1].trim();
@@ -186,6 +229,8 @@ export function getMediaRefs(content: string): MediaRef[] {
       }
     }
     refs.push({
+      start: match.index,
+      end: match.index + match[0].length,
       original: match[0],
       src,
       altText,
@@ -196,7 +241,7 @@ export function getMediaRefs(content: string): MediaRef[] {
     });
   }
 
-  return refs;
+  return refs.sort((a, b) => a.start - b.start);
 }
 
 /**
@@ -302,7 +347,7 @@ function extractBlockReference(content: string, blockId: string): string | undef
  * subpath are ignored.
  */
 export function collectWikiLinkTargets(content: string): string[] {
-  const codeRanges = findCodeRanges(content);
+  const codeRanges = findExcludedRanges(content);
   const targets: string[] = [];
   const seen = new Set<string>();
   const re = /\[\[([^\][\n]+)\]\]/g;
@@ -311,7 +356,7 @@ export function collectWikiLinkTargets(content: string): string[] {
     if (match.index > 0 && content[match.index - 1] === '!') {
       continue;
     }
-    if (inRanges(match.index, codeRanges)) {
+    if (inRanges(match.index, codeRanges) || isEscaped(content, match.index)) {
       continue;
     }
     const target = match[1].split('|')[0].split('#')[0].trim();
@@ -353,14 +398,10 @@ export async function expandNoteEmbeds(
   const visited = options.visited ?? new Set<string>([ sourceFile.path ]);
   const failed: string[] = [];
 
-  if (depth > MAX_EMBED_DEPTH) {
-    return { content, failed: [] };
-  }
-
   const embedRe = /!\[\[([^\][|\n]+?)(#[^\][|\n]*)?(?:\|[^\][\n]*)?\]\]/g;
   // collect matches first, then replace from the last one to keep indices valid
   const matches = [ ...content.matchAll(embedRe) ].reverse();
-  const codeRanges = findCodeRanges(content);
+  const codeRanges = findExcludedRanges(content);
 
   let result = content;
   for (const match of matches) {
@@ -368,7 +409,7 @@ export async function expandNoteEmbeds(
     const target = match[1];
     const subpath = match[2];
     const matchIndex = match.index ?? 0;
-    if (inRanges(matchIndex, codeRanges)) {
+    if (inRanges(matchIndex, codeRanges) || isEscaped(content, matchIndex)) {
       // embeds inside code fences or inline code are part of the code
       continue;
     }
@@ -376,8 +417,9 @@ export async function expandNoteEmbeds(
     if (!(dest instanceof TFile) || dest.extension !== 'md') {
       continue;
     }
-    if (visited.has(dest.path)) {
+    if (visited.has(dest.path) || depth >= MAX_EMBED_DEPTH) {
       failed.push(target.trim());
+      result = result.slice(0, matchIndex) + '\\' + original + result.slice(matchIndex + original.length);
       continue;
     }
     visited.add(dest.path);
@@ -385,11 +427,14 @@ export async function expandNoteEmbeds(
       let embedded = stripFrontmatter(await app.vault.read(dest));
       if (subpath) {
         const section = extractSection(embedded, subpath.substring(1));
-        if (section !== undefined) {
-          embedded = section;
+        if (section === undefined) {
+          failed.push(target.trim() + subpath);
+          result = result.slice(0, matchIndex) + '\\' + original + result.slice(matchIndex + original.length);
+          continue;
         }
+        embedded = section;
       }
-      const nested = await expandNoteEmbeds(app, dest, embedded, {
+      const nested = await expandNoteEmbeds(app, dest, rebaseNoteReferences(app, dest, embedded), {
         depth: depth + 1,
         visited,
       });
@@ -401,6 +446,38 @@ export async function expandNoteEmbeds(
   }
 
   return { content: result, failed };
+}
+
+/** Resolve references before flattening a child note into another note. */
+function rebaseNoteReferences(app: App, sourceFile: TFile, content: string): string {
+  const replacements: Array<{start: number, end: number, replacement: string}> = [];
+  for (const ref of getMediaRefs(content)) {
+    if (ref.isUrl) continue;
+    const [localPath, ...fragment] = ref.src.split('#');
+    const dest = app.metadataCache.getFirstLinkpathDest(decodeMediaSrc(localPath), sourceFile.path);
+    if (!dest) continue;
+    const suffix = fragment.length ? '#' + fragment.join('#') : '';
+    const target = ref.syntax === 'markdown'
+      ? dest.path.split('/').map(encodeURIComponent).join('/') + suffix
+      : dest.path + suffix;
+    const offset = ref.syntax === 'markdown' ? ref.original.indexOf('](') + 2 : 3;
+    const start = ref.original.indexOf(ref.src, offset);
+    if (start >= 0) replacements.push({start:ref.start, end:ref.end, replacement:ref.original.slice(0,start) + target + ref.original.slice(start + ref.src.length)});
+  }
+  const ranges = findExcludedRanges(content);
+  const links = /\[\[([^\][\n]+)\]\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = links.exec(content)) !== null) {
+    if (content[match.index - 1] === '!' || isEscaped(content,match.index) || inRanges(match.index,ranges)) continue;
+    const [target, ...aliasParts] = match[1].split('|');
+    const [localPath, ...subpathParts] = target.split('#');
+    const dest = app.metadataCache.getFirstLinkpathDest(localPath.trim(),sourceFile.path);
+    if (!dest) continue;
+    const subpath = subpathParts.length ? '#' + subpathParts.join('#') : '';
+    const display = aliasParts.length ? aliasParts.join('|') : localPath.trim() + (subpath ? ' > ' + subpath.slice(1) : '');
+    replacements.push({start:match.index,end:links.lastIndex,replacement:`[[${dest.path}${subpath}|${display}]]`});
+  }
+  return replaceContentRanges(content,replacements);
 }
 
 /**

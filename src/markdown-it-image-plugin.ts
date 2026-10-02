@@ -69,9 +69,9 @@ function plugin(md: MarkdownIt): void {
       }
       if (pluginOptions.doWithImage) {
         pluginOptions.doWithImage({
-          src: token.attrs?.[0]?.[1],
-          width: token.attrs?.[1]?.[1],
-          height: token.attrs?.[2]?.[1],
+          src,
+          width,
+          height,
         });
       }
       state.pos += matched.length;
@@ -87,18 +87,18 @@ function plugin(md: MarkdownIt): void {
     const alt = attrs.find(([ name ]) => name === 'alt')?.[1];
     const width = attrs.find(([ name ]) => name === 'width')?.[1];
     const height = attrs.find(([ name ]) => name === 'height')?.[1];
-    if (!src) {
+    if (!src || !md.validateLink(src)) {
       return '';
     }
-    let html = `<img src="${src}"`;
+    let html = `<img src="${md.utils.escapeHtml(src)}"`;
     if (alt) {
-      html += ` alt="${alt}"`;
+      html += ` alt="${md.utils.escapeHtml(alt)}"`;
     }
     if (width) {
-      html += ` width="${width}"`;
+      html += ` width="${md.utils.escapeHtml(width)}"`;
     }
     if (height) {
-      html += ` height="${height}"`;
+      html += ` height="${md.utils.escapeHtml(height)}"`;
     }
     return `${html}>`;
   };

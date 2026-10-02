@@ -10,6 +10,7 @@ import { MarkdownItTaskListPluginInstance } from './markdown-it-tasklist-plugin'
 import { MarkdownItHighlightPluginInstance } from './markdown-it-highlight-plugin';
 import { MarkdownItMermaidPluginInstance } from './markdown-it-mermaid-plugin';
 import { CodeHighlightPluginInstance } from './code-highlight';
+import { markdownItAnchorPlugin } from './markdown-it-anchor-plugin';
 
 class AppStore {
 
@@ -33,4 +34,5 @@ AppState.markdownParser
   .use(MarkdownItHighlightPluginInstance.plugin)
   .use(CodeHighlightPluginInstance.plugin)
   .use(MarkdownItMermaidPluginInstance.plugin)
+  .use(markdownItAnchorPlugin)
   .use(footnote);

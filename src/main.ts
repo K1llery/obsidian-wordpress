@@ -8,10 +8,9 @@ import { OAuth2Client } from './oauth2-client';
 import { CommentStatus, PostStatus, PostTypeConst } from './wp-api';
 import { openProfileChooserModal } from './wp-profile-chooser-modal';
 import { AppState } from './app-state';
-import { DEFAULT_SETTINGS, SettingsVersion, upgradeSettings, WordpressPluginSettings } from './plugin-settings';
+import { DEFAULT_SETTINGS, settingsForPersistence, SettingsVersion, upgradeSettings, WordpressPluginSettings } from './plugin-settings';
 import { PassCrypto } from './pass-crypto';
 import { doClientPublish, setupMarkdownParser, showError } from './utils';
-import { cloneDeep } from 'lodash-es';
 
 export default class WordpressPlugin extends Plugin {
 
@@ -103,17 +102,7 @@ export default class WordpressPlugin extends Plugin {
   }
 
   async saveSettings() {
-    const settings = cloneDeep(this.settings);
-    for (let i = 0; i < settings.profiles.length; i++) {
-      const profile = settings.profiles[i];
-      const password = profile.password;
-      if (password) {
-        const crypto = new PassCrypto();
-        profile.encryptedPassword = await crypto.encrypt(password);
-        delete profile.password;
-      }
-    }
-    await this.saveData(settings);
+    await this.saveData(await settingsForPersistence(this.settings));
   }
 
   updateRibbonIcon(): void {

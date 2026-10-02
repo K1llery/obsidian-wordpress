@@ -1,5 +1,6 @@
 import MarkdownIt from 'markdown-it';
 import Token from 'markdown-it/lib/token.mjs';
+import { subpathAnchor } from './markdown-it-anchor-plugin';
 
 const tokenType = 'ob_wikilink';
 
@@ -69,9 +70,7 @@ export function splitWikiLinkTarget(target: string): [ string, string | undefine
 
 function encodeSubpath(subpath: string): string {
   return subpath
-    .split('#')
-    .map(part => encodeURI(part))
-    .join('/');
+    ? encodeURIComponent(subpathAnchor(subpath)) : '';
 }
 
 function plugin(md: MarkdownIt): void {
@@ -126,7 +125,9 @@ function plugin(md: MarkdownIt): void {
       const href = anchorSubpath
         ? `${resolution.permalink}#${encodeSubpath(anchorSubpath)}`
         : resolution.permalink;
-      return `<a href="${md.utils.escapeHtml(href)}">${md.utils.escapeHtml(display)}</a>`;
+      if (md.validateLink(href)) {
+        return `<a href="${md.utils.escapeHtml(href)}">${md.utils.escapeHtml(display)}</a>`;
+      }
     }
 
     // unresolved or unpublished: render as plain text

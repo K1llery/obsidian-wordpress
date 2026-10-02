@@ -5,29 +5,25 @@ import MarkdownIt from 'markdown-it';
  *
  * Diagrams are rendered to standalone SVG at publish time by
  * `mermaid-renderer.ts`, which replaces each ```mermaid fence with an
- * ```ob-mermaid placeholder fence and stores the SVG in this module.
- * The renderer below then embeds the SVG into the post, so the
+ * ```ob-mermaid placeholder fence and passes SVGs in the render environment.
+ * The renderer below then embeds the SVG in a protected pre element, so the
  * published page needs no WordPress-side mermaid plugin at all.
  *
  * Fences which were not pre-rendered (e.g. rendering failed) fall back
  * to `<pre class="mermaid">` for site-side renderers such as WP
  * Mermaid, and display as a plain code block otherwise.
  */
-const svgStore = new Map<string, string>();
+/**
+ * wpautop inserts paragraph boundaries around style/div tags even in a
+ * single-line SVG. It preserves pre contents before applying those rules,
+ * so keep the complete diagram inside pre and reset the code-block styling.
+ */
+export function wrapMermaidSvg(svg: string): string {
+  return `<pre class="ob-mermaid-diagram" style="display:block;max-width:100%;padding:0;border:0;background:transparent;white-space:normal;line-height:normal;overflow:auto;">${svg}</pre>\n`;
+}
 
 export const MarkdownItMermaidPluginInstance = {
   plugin: plugin,
-  setSvg: (id: string, svg: string): void => {
-    svgStore.set(id, svg);
-  },
-  consumeSvg: (id: string): string | undefined => {
-    const svg = svgStore.get(id);
-    svgStore.delete(id);
-    return svg;
-  },
-  clearSvgs: (): void => {
-    svgStore.clear();
-  },
 }
 
 function plugin(md: MarkdownIt): void {
@@ -36,9 +32,9 @@ function plugin(md: MarkdownIt): void {
     const token = tokens[idx];
     const info = token.info.trim();
     if (info === 'ob-mermaid') {
-      const svg = MarkdownItMermaidPluginInstance.consumeSvg(token.content.trim());
+      const svg: string | undefined = env?.mermaidSvgs?.get(token.content.trim());
       if (svg !== undefined) {
-        return `${svg}\n`;
+        return wrapMermaidSvg(svg);
       }
       // no pre-rendered SVG: fall through to the plain code block
     }

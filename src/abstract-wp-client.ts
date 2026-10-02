@@ -13,7 +13,6 @@ import { WpPublishModal } from './wp-publish-modal';
 import { PostType, PostTypeConst, Term } from './wp-api';
 import { ERROR_NOTICE_TIMEOUT, WP_DEFAULT_PROFILE_NAME } from './consts';
 import { isPromiseFulfilledResult, openWithBrowser, processFile, SafeAny, showError, } from './utils';
-import { getWordPressClient } from './wp-clients';
 import { WpProfile } from './wp-profile';
 import { AppState } from './app-state';
 import { ConfirmCode, openConfirmModal } from './confirm-modal';
@@ -32,7 +31,8 @@ import {
   getMediaRefs,
   isImageFile,
   MediaRef,
-  mimeTypeFor
+  mimeTypeFor,
+  replaceContentRanges
 } from './publish-converters';
 
 export abstract class AbstractWordPressClient implements WordPressClient {
@@ -156,11 +156,6 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       postParams,
       sourceFile
     });
-    // links to other published notes are converted to their permalinks
-    MarkdownItWikiLinkPluginInstance.resetUnresolved();
-    MarkdownItWikiLinkPluginInstance.setResolver(
-      createWikiLinkResolver(this.plugin.app, this.profile, sourceFile, publishedLinks)
-    );
     // mermaid diagrams are rendered to inline SVG before the synchronous
     // markdown pass, so the post is self-contained
     const mermaidResult = await renderMermaidDiagrams(postParams.content);
@@ -170,7 +165,12 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         count: String(mermaidResult.failed.length)
       }), ERROR_NOTICE_TIMEOUT);
     }
-    const html = ensureEmbeddedStyles(AppState.markdownParser.render(postParams.content));
+    // Set synchronous parser state only after asynchronous rendering finishes.
+    MarkdownItWikiLinkPluginInstance.resetUnresolved();
+    MarkdownItWikiLinkPluginInstance.setResolver(
+      createWikiLinkResolver(this.plugin.app, this.profile, sourceFile, publishedLinks)
+    );
+    const html = ensureEmbeddedStyles(AppState.markdownParser.render(postParams.content, { mermaidSvgs: mermaidResult.svgs }));
     const highlighted = (html.match(/class="language-/g) ?? []).length;
     if (mermaidResult.rendered > 0 || highlighted > 0) {
       // lets the user confirm the new publish pipeline actually ran
@@ -255,7 +255,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       return;
     }
 
-    const replacements: { original: string, replacement: string }[] = [];
+    const replacements: { start: number, end: number, replacement: string }[] = [];
     // cache of uploaded media during this publish, so that the same
     // media file is only uploaded once per publish
     const uploadedInThisPublish = new Map<string, string>();
@@ -276,10 +276,12 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         }), ERROR_NOTICE_TIMEOUT);
         continue;
       }
+      // Failed/cyclic/deep note embeds must never become raw attachments.
+      if (mediaFile.extension.toLowerCase() === 'md') continue;
 
       let url = uploadedInThisPublish.get(mediaFile.path);
       if (!url) {
-        url = this.getCachedMediaUrl(mediaFile);
+        url = await this.getCachedMediaUrl(mediaFile);
       }
       if (!url) {
         const content = await this.plugin.app.vault.readBinary(mediaFile);
@@ -291,7 +293,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         if (result.code === WordPressClientReturnCode.OK) {
           url = result.data.url;
           uploadedInThisPublish.set(mediaFile.path, url);
-          this.setCachedMediaUrl(mediaFile, url);
+          await this.setCachedMediaUrl(mediaFile, url);
         } else if (result.error.code === WordPressClientReturnCode.ServerInternalError) {
           new Notice(result.error.message, ERROR_NOTICE_TIMEOUT);
           continue;
@@ -306,26 +308,29 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       }
 
       replacements.push({
-        original: ref.original,
+        start: ref.start,
+        end: ref.end,
         replacement: buildMediaReplacement(ref, mediaFile, url),
       });
     }
 
-    for (const { original, replacement } of replacements) {
-      postParams.content = postParams.content.replace(original, replacement);
-    }
+    postParams.content = replaceContentRanges(postParams.content, replacements);
 
     if (this.plugin.settings.replaceMediaLinks && replacements.length > 0) {
       // replace the media links in the note itself. The expanded content
       // is never written back, only the media replacements are applied
       // to the original note content.
-      let noteContent = await this.plugin.app.vault.read(sourceFile);
-      for (const { original, replacement } of replacements) {
-        noteContent = noteContent.replace(original, replacement);
-      }
-      if (noteContent !== (await this.plugin.app.vault.read(sourceFile))) {
-        await this.plugin.app.vault.modify(sourceFile, noteContent);
-      }
+      await this.plugin.app.vault.process(sourceFile, noteContent => {
+        const edits: typeof replacements = [];
+        for (const ref of getMediaRefs(noteContent)) {
+          if (ref.isUrl) continue;
+          const dest = this.plugin.app.metadataCache.getFirstLinkpathDest(decodeMediaSrc(ref.src.split('#')[0]),sourceFile.path);
+          if (!(dest instanceof TFile) || dest.extension.toLowerCase() === 'md') continue;
+          const url = uploadedInThisPublish.get(dest.path);
+          if (url) edits.push({start:ref.start,end:ref.end,replacement:buildMediaReplacement(ref,dest,url)});
+        }
+        return replaceContentRanges(noteContent,edits);
+      });
     }
   }
 
@@ -333,26 +338,35 @@ export abstract class AbstractWordPressClient implements WordPressClient {
    * Returns the uploaded WordPress URL of the media file if it has been
    * uploaded before and has not been modified since then.
    */
-  private getCachedMediaUrl(file: TFile): string | undefined {
+  private async getCachedMediaUrl(file: TFile): Promise<string | undefined> {
+    const key = await this.mediaCacheKey(file);
     const cache = this.plugin.settings.mediaUploadCache;
-    const entry = cache?.[file.path];
+    const entry = cache?.[key];
     if (entry && entry.mtime === file.stat.mtime) {
       return entry.url;
     }
     return undefined;
   }
 
-  private setCachedMediaUrl(file: TFile, url: string): void {
+  private async setCachedMediaUrl(file: TFile, url: string): Promise<void> {
+    const key = await this.mediaCacheKey(file);
     if (!this.plugin.settings.mediaUploadCache) {
       this.plugin.settings.mediaUploadCache = {};
     }
-    const cache = this.plugin.settings.mediaUploadCache;
     // drop the whole cache when it grows too large
-    if (Object.keys(cache).length >= MEDIA_CACHE_MAX_ENTRIES) {
+    if (Object.keys(this.plugin.settings.mediaUploadCache).length >= MEDIA_CACHE_MAX_ENTRIES) {
       this.plugin.settings.mediaUploadCache = {};
     }
-    cache[file.path] = { url, mtime: file.stat.mtime };
-    this.plugin.saveSettings();
+    this.plugin.settings.mediaUploadCache[key] = { url, mtime: file.stat.mtime };
+    await this.plugin.saveSettings();
+  }
+
+  private async mediaCacheKey(file: TFile): Promise<string> {
+    // Account isolation must not persist an unremembered username in a key.
+    const identity = JSON.stringify([this.profile.endpoint.replace(/\/+$/, ''), this.profile.username ?? '', this.profile.wpComOAuth2Token?.blogId ?? '']);
+    const digest = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(identity));
+    const scope = Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
+    return JSON.stringify([scope,file.path]);
   }
 
   async publishPost(defaultPostParams?: WordPressPostParams): Promise<WordPressClientResult<WordPressPublishResult>> {
@@ -410,9 +424,12 @@ export abstract class AbstractWordPressClient implements WordPressClient {
           // the post id from another site would be used against this site
           const oldProfile = this.plugin.settings.profiles.find(p => p.name === matterData.profileName);
           if (oldProfile) {
+            const { getWordPressClient } = await import('./wp-clients');
             const client = getWordPressClient(this.plugin, oldProfile);
             if (client) {
-              return client.publishPost(defaultPostParams);
+              if (client instanceof AbstractWordPressClient) {
+                return client.publishFile(file, { defaultPostParams });
+              }
             }
           }
           throw new Error(this.plugin.i18n.t('error_noSuchProfile', {
@@ -421,16 +438,13 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         }
       }
 
-      // publish notes referenced by wikilinks before this note, so that
-      // the links can resolve to their permalinks
-      await this.autoPublishLinkedNotes(file, expandResult.content, visited, publishedLinks);
-
       // now we're preparing the publishing data
       let postParams: WordPressPostParams;
       let result: WordPressClientResult<WordPressPublishResult> | undefined;
       if (defaultPostParams || auto) {
         postParams = this.readFromFrontMatter(title, matterData, defaultPostParams ?? this.buildDefaultPostParams());
         postParams.content = expandResult.content;
+        await this.autoPublishLinkedNotes(file, expandResult.content, visited, publishedLinks);
         result = await this.tryToPublish({
           auth,
           postParams,
@@ -456,6 +470,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
               postParams = this.readFromFrontMatter(title, matterData, postParams);
               postParams.content = expandResult.content;
               try {
+                await this.autoPublishLinkedNotes(file, expandResult.content, visited, publishedLinks);
                 const r = await this.tryToPublish({
                   auth,
                   postParams,
@@ -464,7 +479,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
                   updateMatterData
                 });
                 if (r.code === WordPressClientReturnCode.OK) {
-                  publishModal.close();
+                  publishModal.closeAfterPublish();
                   resolve(r);
                 }
               } catch (error) {
@@ -475,7 +490,8 @@ export abstract class AbstractWordPressClient implements WordPressClient {
                 }
               }
             },
-            matterData);
+            matterData,
+            () => resolve({code:WordPressClientReturnCode.Error,error:{code:WordPressClientReturnCode.Error,message:this.plugin.i18n.t('message_publishCancelled')}}));
           publishModal.open();
         });
       }
