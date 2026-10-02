@@ -130,6 +130,7 @@ function plugin(md: MarkdownIt): void {
     }
 
     // unresolved or unpublished: render as plain text
+    pluginOptions.unresolved.push(target);
     pluginOptions.onUnresolved(target);
     return md.utils.escapeHtml(display);
   };

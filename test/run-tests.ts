@@ -104,10 +104,10 @@ async function main(): Promise<void> {
   await test('wikilink to a missing note is reported and rendered as text', () => {
     const md = createParser();
     MarkdownItWikiLinkPluginInstance.setResolver(() => ({ exists: false }));
-    const unresolved: string[] = [];
-    MarkdownItWikiLinkPluginInstance.onUnresolved(target => unresolved.push(target));
+    MarkdownItWikiLinkPluginInstance.resetUnresolved();
+    MarkdownItWikiLinkPluginInstance.onUnresolved(() => {});
     assertEqual(md.renderInline('See [[ghost]].'), 'See ghost.');
-    assertEqual(unresolved, [ 'ghost' ]);
+    assertEqual(MarkdownItWikiLinkPluginInstance.takeUnresolved(), [ 'ghost' ]);
   });
 
   await test('wikilinks inside code blocks are not converted', () => {

@@ -77881,6 +77881,7 @@ function plugin4(md) {
       const href = anchorSubpath ? `${resolution.permalink}#${encodeSubpath(anchorSubpath)}` : resolution.permalink;
       return `<a href="${md.utils.escapeHtml(href)}">${md.utils.escapeHtml(display)}</a>`;
     }
+    pluginOptions4.unresolved.push(target);
     pluginOptions4.onUnresolved(target);
     return md.utils.escapeHtml(display);
   };
