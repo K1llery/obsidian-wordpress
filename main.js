@@ -79789,6 +79789,13 @@ function base64Url(buf) {
 }
 
 // src/wp-profile-modal.ts
+function normalizeEndpoint(endpoint) {
+  const trimmed = endpoint.trim().replace(/\/+$/, "");
+  if (trimmed.length > 0 && !/^https?:\/\//i.test(trimmed)) {
+    return `http://${trimmed}`;
+  }
+  return trimmed;
+}
 function openProfileModal(plugin9, profile = {
   name: "",
   apiType: "application-passwords" /* RestApi_ApplicationPasswords */,
@@ -79924,40 +79931,26 @@ var WpProfileModal = class extends AbstractModal {
         }));
       }
       if (this.profileData.apiType !== "WpComOAuth2" /* RestApi_WpComOAuth2 */) {
-        const usernameSetting = new import_obsidian13.Setting(content).setName(this.t("profileModal_rememberUsername"));
-        if (this.profileData.saveUsername) {
-          usernameSetting.addText(
-            (text4) => {
-              var _a2;
-              return text4.setValue((_a2 = this.profileData.username) != null ? _a2 : "").onChange((value) => {
-                this.profileData.username = value;
-              });
-            }
-          );
-        }
-        usernameSetting.addToggle(
-          (toggle) => toggle.setValue(this.profileData.saveUsername).onChange((save) => {
-            this.profileData.saveUsername = save;
-            renderProfile();
-          })
-        );
-        const passwordSetting = new import_obsidian13.Setting(content).setName(this.t("profileModal_rememberPassword"));
-        if (this.profileData.savePassword) {
-          passwordSetting.addText(
-            (text4) => {
-              var _a2;
-              return text4.setValue((_a2 = this.profileData.password) != null ? _a2 : "").onChange((value) => {
-                this.profileData.password = value;
-              });
-            }
-          );
-        }
-        passwordSetting.addToggle(
-          (toggle) => toggle.setValue(this.profileData.savePassword).onChange((save) => {
-            this.profileData.savePassword = save;
-            renderProfile();
-          })
-        );
+        new import_obsidian13.Setting(content).setName(this.t("loginModal_username")).addText((text4) => {
+          var _a2;
+          return text4.setPlaceholder(this.t("loginModal_username")).setValue((_a2 = this.profileData.username) != null ? _a2 : "").onChange((value) => {
+            this.profileData.username = value;
+          });
+        }).addToggle((toggle) => toggle.setValue(this.profileData.saveUsername).setTooltip(this.t("profileModal_rememberUsername")).onChange((save) => {
+          this.profileData.saveUsername = save;
+        }));
+        new import_obsidian13.Setting(content).setName(this.t("loginModal_password")).addText((text4) => {
+          var _a2;
+          text4.inputEl.type = "password";
+          text4.setPlaceholder(this.t("loginModal_password")).setValue((_a2 = this.profileData.password) != null ? _a2 : "").onChange((value) => {
+            this.profileData.password = value;
+          });
+        }).addToggle((toggle) => toggle.setValue(this.profileData.savePassword).setTooltip(this.t("profileModal_rememberPassword")).onChange((save) => {
+          this.profileData.savePassword = save;
+        }));
+        new import_obsidian13.Setting(content).addButton((button) => button.setButtonText(this.t("profileModal_testConnection")).onClick(async () => {
+          await this.testConnection();
+        }));
       }
       new import_obsidian13.Setting(content).setName(this.t("profileModal_setDefault")).addToggle(
         (toggle) => toggle.setValue(this.profileData.isDefault).onChange((value) => {
@@ -79966,6 +79959,7 @@ var WpProfileModal = class extends AbstractModal {
       );
       new import_obsidian13.Setting(content).addButton(
         (button) => button.setButtonText(this.t("profileModal_Save")).setCta().onClick(() => {
+          this.profileData.endpoint = normalizeEndpoint(this.profileData.endpoint);
           if (!isValidUrl(this.profileData.endpoint)) {
             showError(this.t("error_invalidUrl"));
           } else if (this.profileData.name.length === 0) {
@@ -80001,6 +79995,44 @@ var WpProfileModal = class extends AbstractModal {
       blog: this.profileData.endpoint,
       codeVerifier: AppState.codeVerifier
     });
+  }
+  /**
+   * Checks whether the entered address and credentials work
+   * without saving the profile.
+   */
+  async testConnection() {
+    var _a2, _b;
+    const endpoint = normalizeEndpoint(this.profileData.endpoint);
+    if (!isValidUrl(endpoint)) {
+      showError(this.t("error_invalidUrl"));
+      return;
+    }
+    if (!this.profileData.username) {
+      showError(this.t("error_noUsername"));
+      return;
+    }
+    if (!this.profileData.password) {
+      showError(this.t("error_noPassword"));
+      return;
+    }
+    new import_obsidian13.Notice(this.t("message_testingConnection"));
+    const profile = {
+      ...this.profileData,
+      endpoint
+    };
+    const client = getWordPressClient(this.plugin, profile);
+    if (!client) {
+      return;
+    }
+    const result = await client.validateUser({
+      username: this.profileData.username,
+      password: this.profileData.password
+    });
+    if (result.code === 0 /* OK */) {
+      new import_obsidian13.Notice(this.t("message_connectionOk"));
+    } else {
+      showError((_b = (_a2 = result.error) == null ? void 0 : _a2.message) != null ? _b : this.t("error_invalidUser"));
+    }
   }
 };
 
@@ -80259,9 +80291,11 @@ __export(en_exports, {
   loginModal_title: () => loginModal_title,
   loginModal_username: () => loginModal_username,
   loginModal_usernameDesc: () => loginModal_usernameDesc,
+  message_connectionOk: () => message_connectionOk,
   message_mediaCacheCleared: () => message_mediaCacheCleared,
   message_publishFailed: () => message_publishFailed,
   message_publishSuccessfully: () => message_publishSuccessfully,
+  message_testingConnection: () => message_testingConnection,
   message_wpComTokenValidated: () => message_wpComTokenValidated,
   profileModal_Save: () => profileModal_Save,
   profileModal_name: () => profileModal_name,
@@ -80269,6 +80303,7 @@ __export(en_exports, {
   profileModal_rememberPassword: () => profileModal_rememberPassword,
   profileModal_rememberUsername: () => profileModal_rememberUsername,
   profileModal_setDefault: () => profileModal_setDefault,
+  profileModal_testConnection: () => profileModal_testConnection,
   profileModal_title: () => profileModal_title,
   profileNotMatch_useNew: () => profileNotMatch_useNew,
   profileNotMatch_useOld: () => profileNotMatch_useOld,
@@ -80388,6 +80423,8 @@ var settings_clearMediaCacheDesc = "The plugin remembers uploaded media files to
 var settings_clearMediaCacheButtonText = "Clear";
 var message_mediaCacheCleared = "Media upload cache cleared";
 var message_publishSuccessfully = "Post published successfully!";
+var message_testingConnection = "Testing connection\u2026";
+var message_connectionOk = "Connection OK! The address and credentials work.";
 var message_publishFailed = "Post published failed!";
 var message_wpComTokenValidated = "Wordpress.com token validated successfully!";
 var ribbon_iconTitle = "WordPress Publish";
@@ -80488,6 +80525,7 @@ var profilesManageModal_create = "Create";
 var profilesManageModal_createDesc = "Creates a new WordPress profile.";
 var profileModal_title = "Profile";
 var profileModal_Save = "Save";
+var profileModal_testConnection = "Test connection";
 var profileModal_name = "Name";
 var profileModal_nameDesc = "WordPress name of this profile.";
 var profileModal_rememberUsername = "Remember Username";
@@ -80525,6 +80563,8 @@ var en_default = {
   settings_clearMediaCacheButtonText,
   message_mediaCacheCleared,
   message_publishSuccessfully,
+  message_testingConnection,
+  message_connectionOk,
   message_publishFailed,
   message_wpComTokenValidated,
   ribbon_iconTitle,
@@ -80625,6 +80665,7 @@ var en_default = {
   profilesManageModal_createDesc,
   profileModal_title,
   profileModal_Save,
+  profileModal_testConnection,
   profileModal_name,
   profileModal_nameDesc,
   profileModal_rememberUsername,
@@ -80675,9 +80716,11 @@ __export(zh_cn_exports, {
   loginModal_title: () => loginModal_title2,
   loginModal_username: () => loginModal_username2,
   loginModal_usernameDesc: () => loginModal_usernameDesc2,
+  message_connectionOk: () => message_connectionOk2,
   message_mediaCacheCleared: () => message_mediaCacheCleared2,
   message_publishFailed: () => message_publishFailed2,
   message_publishSuccessfully: () => message_publishSuccessfully2,
+  message_testingConnection: () => message_testingConnection2,
   message_wpComTokenValidated: () => message_wpComTokenValidated2,
   profileModal_Save: () => profileModal_Save2,
   profileModal_name: () => profileModal_name2,
@@ -80685,6 +80728,7 @@ __export(zh_cn_exports, {
   profileModal_rememberPassword: () => profileModal_rememberPassword2,
   profileModal_rememberUsername: () => profileModal_rememberUsername2,
   profileModal_setDefault: () => profileModal_setDefault2,
+  profileModal_testConnection: () => profileModal_testConnection2,
   profileModal_title: () => profileModal_title2,
   profileNotMatch_useNew: () => profileNotMatch_useNew2,
   profileNotMatch_useOld: () => profileNotMatch_useOld2,
@@ -80804,6 +80848,8 @@ var settings_clearMediaCacheDesc2 = "\u63D2\u4EF6\u4F1A\u8BB0\u5F55\u5DF2\u4E0A\
 var settings_clearMediaCacheButtonText2 = "\u6E05\u9664";
 var message_mediaCacheCleared2 = "\u5A92\u4F53\u4E0A\u4F20\u7F13\u5B58\u5DF2\u6E05\u9664";
 var message_publishSuccessfully2 = "\u6587\u7AE0\u53D1\u5E03\u6210\u529F";
+var message_testingConnection2 = "\u6B63\u5728\u6D4B\u8BD5\u8FDE\u63A5\u2026";
+var message_connectionOk2 = "\u8FDE\u63A5\u6210\u529F\uFF01\u5730\u5740\u548C\u51ED\u636E\u53EF\u7528\u3002";
 var message_publishFailed2 = "\u6587\u7AE0\u53D1\u5E03\u5931\u8D25";
 var message_wpComTokenValidated2 = "Wordpress.com \u4EE4\u724C\u9A8C\u8BC1\u901A\u8FC7";
 var ribbon_iconTitle2 = "\u53D1\u5E03\u5230 WordPress";
@@ -80904,6 +80950,7 @@ var profilesManageModal_create2 = "\u521B\u5EFA";
 var profilesManageModal_createDesc2 = "\u521B\u5EFA\u65B0\u7684 WordPress \u5E10\u6237";
 var profileModal_title2 = "WordPress \u5E10\u6237";
 var profileModal_Save2 = "\u4FDD\u5B58";
+var profileModal_testConnection2 = "\u6D4B\u8BD5\u8FDE\u63A5";
 var profileModal_name2 = "\u540D\u79F0";
 var profileModal_nameDesc2 = "WordPress \u8D26\u6237\u540D\u79F0";
 var profileModal_rememberUsername2 = "\u8BB0\u4F4F\u7528\u6237\u540D";
@@ -80941,6 +80988,8 @@ var zh_cn_default = {
   settings_clearMediaCacheButtonText: settings_clearMediaCacheButtonText2,
   message_mediaCacheCleared: message_mediaCacheCleared2,
   message_publishSuccessfully: message_publishSuccessfully2,
+  message_testingConnection: message_testingConnection2,
+  message_connectionOk: message_connectionOk2,
   message_publishFailed: message_publishFailed2,
   message_wpComTokenValidated: message_wpComTokenValidated2,
   ribbon_iconTitle: ribbon_iconTitle2,
@@ -81041,6 +81090,7 @@ var zh_cn_default = {
   profilesManageModal_createDesc: profilesManageModal_createDesc2,
   profileModal_title: profileModal_title2,
   profileModal_Save: profileModal_Save2,
+  profileModal_testConnection: profileModal_testConnection2,
   profileModal_name: profileModal_name2,
   profileModal_nameDesc: profileModal_nameDesc2,
   profileModal_rememberUsername: profileModal_rememberUsername2,
