@@ -1,5 +1,6 @@
 import { CommentStatus, PostStatus, PostType } from './wp-api';
 import { SafeAny } from './utils';
+import type { BatchPublishOptions, BatchPublishPlan, BatchPublishResult } from './batch-publish';
 
 export enum WordPressClientReturnCode {
   OK,
@@ -118,6 +119,8 @@ export interface WordPressClient {
    * @param defaultPostParams Use this parameter instead of popup publish modal if this is not undefined.
    */
   publishPost(defaultPostParams?: WordPressPostParams): Promise<WordPressClientResult<WordPressPublishResult>>;
+
+  publishBatch(plan: BatchPublishPlan, options?: BatchPublishOptions & {status?: PostStatus}): Promise<BatchPublishResult>;
 
   /**
    * Checks if the login certificate is OK.

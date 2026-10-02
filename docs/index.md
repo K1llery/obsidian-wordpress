@@ -139,6 +139,43 @@ Posts which use callouts, task lists, highlights, footnotes or
 highlighted code get a small stylesheet embedded into the post content,
 so they look right with any WordPress theme without extra plugins.
 
+## Batch publishing
+
+Use the **Batch publish notes or a folder** command, or select multiple notes in
+Obsidian's File Explorer and use the WordPress item in the right-click menu.
+The same menu on a folder selects all Markdown notes in that folder, including
+subfolders. The batch window also supports searching, checkboxes and folder
+selection.
+
+Choose one target account and an article status, then click **Preview publish
+list**. This read-only scan lists the selected articles, additional referenced
+articles and attachments before any uploads or publications occur. Referenced
+and embedded Markdown notes are included recursively, even outside the selected
+folder, and will be published **in full**. Existing articles on the target account
+are updated. Notes associated with another account create new articles on the
+selected account and receive new local publishing metadata; these are listed
+separately in the confirmation window.
+
+Batch publishing includes references automatically, independently of the
+single-note `Auto publish linked notes` setting. Wiki links, note embeds and
+ordinary/reference-style Markdown links are supported. Code and comments are
+excluded. Images and linked attachments are uploaded automatically, with shared
+files using the upload cache. Referenced articles are published before their
+parents when possible; cyclic references receive a link update after their
+article IDs exist, without duplicate creation.
+
+The confirmed scan uses a snapshot of the note contents. Changes made after the
+preview cannot silently add articles to the batch; go back and preview again to
+include edits. All articles share the chosen status and use their own frontmatter
+for titles, tags and categories, falling back to account defaults. Per-note
+publishing and browser-edit dialogs are suppressed. The progress window can stop
+remaining tasks; the current article finishes and completed articles/uploads
+are kept. Closing the batch window or unloading the plugin also stops subsequent
+tasks. A summary lists successful, failed and unexecuted articles, including
+any links still needing an update. Attachment upload failures fail the affected
+article. Independent articles continue; articles that depend on a failed article
+are reported as failed too.
+
 ## Linked notes
 
 When the `Auto publish linked notes` setting is enabled (off by default), notes

@@ -21,6 +21,7 @@ export class TFile {
 }
 
 export class TFolder {
+  constructor(public path: string) {}
 }
 
 export class Notice {
@@ -44,7 +45,14 @@ export class Events {
 }
 
 export class Plugin {
+  commands: Array<Record<string, unknown>> = [];
+  addCommand(command: Record<string, unknown>): void {this.commands.push(command);}
+  registerEvent(): void {}
+  addSettingTab(): void {}
+  registerObsidianProtocolHandler(): void {}
 }
+
+export const moment = {locale: () => 'zh-cn'};
 
 export class PluginSettingTab {
 }
@@ -77,6 +85,8 @@ export class Setting {
     return this;
   }
 }
+
+export class ButtonComponent {}
 
 export class Modal {
   static openHook?: (modal: Modal) => void;

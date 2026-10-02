@@ -1,6 +1,10 @@
 import MarkdownIt from 'markdown-it';
 import footnote from 'markdown-it-footnote';
-import { TFile, Modal, setRequestUrlHandler } from './obsidian-stub';
+import { TFile, TFolder, Modal, setRequestUrlHandler } from './obsidian-stub';
+import { buildBatchPublishPlan, collectBatchFiles } from '../src/batch-publish';
+import { openLoginModal, WpLoginModal } from '../src/wp-login-modal';
+import { PostStatus } from '../src/wp-api';
+import WordpressPlugin from '../src/main';
 import { markdownItAnchorPlugin } from '../src/markdown-it-anchor-plugin';
 import { AbstractWordPressClient } from '../src/abstract-wp-client';
 import { WordPressClientReturnCode, WordPressPostParams } from '../src/wp-client';
@@ -25,6 +29,7 @@ import {
   expandNoteEmbeds,
   extractSection,
   getMediaRefs,
+  getFileReferences,
   mimeTypeFor,
   replaceContentRanges
 } from '../src/publish-converters';
@@ -778,6 +783,193 @@ async function main(): Promise<void> {
     assertEqual(client.published.filter(post=>post.content.includes('https://site/B/')).length,1);
   });
 
+  console.log('batch publishing:');
+  await test('folder selection includes descendants, deduplicates notes and respects path boundaries', () => {
+    const files = {'folder/a.md':'','folder/sub/b.md':'','folder-other/c.md':'','folder/img.png':'','elsewhere.md':''};
+    const app = createFakeApp(files) as SafeAny;
+    assertEqual(collectBatchFiles(app,[new TFolder('folder'),new TFile('folder/a.md')]).map(file=>file.path),['folder/a.md','folder/sub/b.md']);
+    assertEqual(collectBatchFiles(app,[new TFolder('/')]).length,4);
+    assertEqual(collectBatchFiles(app,[new TFolder('empty')]),[]);
+  });
+  await test('read-only preflight recursively lists wiki, embedded and Markdown references and attachments', async () => {
+    const files = {'main.md':'---\nprivate: [[secret]]\n---\n[[child]] ![[embed]] [third][ref]\n\n[ref]: third.md\n\n%% [[secret]] %%\n`[[secret]]`\\[[secret]]\n\n    [[secret]]',
+      'child.md':'[PDF](manual.pdf) ![image](<pic (1).png>)','embed.md':'[[child]]', 'third.md':'[[child]]',
+      'secret.md':'private','manual.pdf':'pdf','pic (1).png':'image'};
+    const profile = makeProfile('https://site.example');
+    const plugin = makePublishingPlugin(files,profile);
+    const client = new FakeWordPressClient(plugin,profile);
+    const plan = await buildBatchPublishPlan(plugin.app,[new TFile('main.md'),new TFile('child.md')],profile);
+    assertEqual(plan.entries.map(entry=>entry.file.path).sort(),['child.md','embed.md','main.md','third.md']);
+    assertEqual(plan.entries.filter(entry=>entry.selected).length,2);
+    assertEqual(plan.attachments.map(file=>file.path),['manual.pdf','pic (1).png']);
+    assertEqual(client.published.length,0); assertEqual(client.uploads.length,0);
+    assertEqual(Object.keys(plugin.app.metadataCache.getFileCache(new TFile('main.md'))??{}).length,0);
+  });
+  await test('batch uses the confirmed snapshot and does not auto-publish references added afterwards', async () => {
+    const files = {'main.md':'[[child]]','child.md':'confirmed','secret.md':'private'};
+    const profile = makeProfile('https://site.example');
+    const plugin = makePublishingPlugin(files,profile);
+    const plan = await buildBatchPublishPlan(plugin.app,[new TFile('main.md')],profile);
+    files['child.md']='[[secret]] edited';
+    files['main.md']='[[secret]] edited';
+    plugin.app.workspace.getActiveFile=()=>new TFile('secret.md');
+    const client = new FakeWordPressClient(plugin,profile);
+    const result = await client.publishBatch(plan);
+    assertEqual(result.items.map(item=>item.status),['success','success']);
+    assertEqual(client.published.map(post=>post.title),['child','main']);
+    assertIncludes(client.published[0].content,'confirmed');
+    assertEqual(client.published.some(post=>post.content.includes('private')),false);
+  });
+  await test('batch uploads shared images and ordinary attachments once and resolves Markdown note links', async () => {
+    const files = {'main.md':'[[child]] [child heading](child.md#A%20heading) ![[shared.png]] [PDF][ref]\n\n[ref]: file.pdf',
+      'child.md':'# A heading\n![[shared.png]] [image](shared.png) [[file.pdf]]', 'shared.png':'image','file.pdf':'pdf'};
+    const profile = makeProfile('https://site.example');
+    const plugin = makePublishingPlugin(files,profile);
+    const client = new FakeWordPressClient(plugin,profile);
+    const result = await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('main.md'),new TFile('child.md')],profile),{status:PostStatus.Publish});
+    assertEqual(result.items.filter(item=>item.status==='success').length,2);
+    assertEqual(client.uploads.slice().sort(),['file.pdf','shared.png']);
+    assertIncludes(client.published[1].content,'https://site.example/posts/1/#A-heading');
+    assertIncludes(client.published[1].content,'https://site.example/media/file.pdf');
+    assertEqual(client.published.every(post=>post.params?.status===PostStatus.Publish),true);
+    assertEqual(client.published.length,2);
+  });
+  await test('cyclic references get a link repair with the original post ID instead of duplicate creation', async () => {
+    const files = {'a.md':'[[b]]','b.md':'[a](a.md)'};
+    const profile = makeProfile('https://site.example');
+    const plugin = makePublishingPlugin(files,profile);
+    const client = new FakeWordPressClient(plugin,profile);
+    const result = await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('a.md')],profile));
+    assertEqual(result.items.filter(item=>item.status==='success').length,2);
+    assertEqual(client.published.map(post=>post.title),['b','a','b']);
+    assertEqual(client.published[2].params?.postId,'1');
+    assertIncludes(client.published[1].content,'https://site.example/posts/1/');
+    assertIncludes(client.published[2].content,'https://site.example/posts/2/');
+  });
+  await test('batch creates on the selected account without reusing another profile post ID', async () => {
+    const files = {'old.md':'old','same.md':'same'};
+    const profile = makeProfile('https://site.example');
+    const matter = {'old.md':{profileName:'Other',postId:'99',categories:[88]},'same.md':{profileName:profile.name,postId:'7'}};
+    const plugin = makePublishingPlugin(files,profile,matter);
+    const client = new FakeWordPressClient(plugin,profile);
+    const result = await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('old.md'),new TFile('same.md')],profile));
+    assertEqual(result.items.every(item=>item.status==='success'),true);
+    assertEqual(client.published[0].params?.postId,undefined); assertEqual(client.published[0].params?.categories,[1]);
+    assertEqual(client.published[1].params?.postId,'7');
+    assertEqual(matter['old.md'].profileName,profile.name);
+  });
+  await test('batch isolates article failures, reports dependents and continues independent notes', async () => {
+    const files = {'main.md':'[[bad]]','bad.md':'bad','independent.md':'ok'};
+    const profile = makeProfile('https://site.example');
+    const plugin = makePublishingPlugin(files,profile);
+    const client = new FakeWordPressClient(plugin,profile);
+    const original = client.publish.bind(client);
+    client.publish=async(title,content,params)=>title==='bad' ? {code:WordPressClientReturnCode.Error,error:{code:'blocked',message:'server refused'}} : original(title,content,params);
+    const result = await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('main.md'),new TFile('independent.md')],profile));
+    assertEqual(result.items.map(item=>[item.path,item.status]),[['bad.md','failed'],['main.md','failed'],['independent.md','success']]);
+    assertEqual(client.published.map(post=>post.title),['independent']);
+  });
+  await test('a failed attachment upload is reported without publishing a broken article', async () => {
+    const files = {'main.md':'[PDF](file.pdf)','file.pdf':'pdf'};
+    const profile = makeProfile('https://site.example');
+    const plugin = makePublishingPlugin(files,profile);
+    const client = new FakeWordPressClient(plugin,profile);
+    client.uploadMedia=async()=>({code:WordPressClientReturnCode.Error,error:{code:'blocked',message:'upload refused'}});
+    const result = await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('main.md')],profile));
+    assertEqual(result.items[0].status,'failed'); assertIncludes(result.items[0].error??'','upload refused');
+    assertEqual(client.published.length,0);
+  });
+  await test('stopping a batch completes the current article and leaves later articles unexecuted', async () => {
+    const files = {'a.md':'a','b.md':'b'};
+    const profile = makeProfile('https://site.example');
+    const plugin = makePublishingPlugin(files,profile);
+    const client = new FakeWordPressClient(plugin,profile);
+    let stop=false;
+    const original = client.publish.bind(client);
+    client.publish=async(title,content,params)=>{const result=await original(title,content,params);stop=true;return result;};
+    const result = await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('a.md'),new TFile('b.md')],profile),{shouldCancel:()=>stop});
+    assertEqual(result.cancelled,true);
+    assertEqual(result.items.map(item=>item.status),['success','skipped']);
+    assertEqual(client.published.length,1);
+  });
+  await test('cancelled batch before execution does not upload or publish anything', async () => {
+    const files = {'a.md':'![[image.png]]','image.png':'image'};
+    const profile = makeProfile('https://site.example');
+    const plugin = makePublishingPlugin(files,profile);
+    const client = new FakeWordPressClient(plugin,profile);
+    const result = await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('a.md')],profile),{shouldCancel:()=>true});
+    assertEqual(result.items[0].status,'skipped');
+    assertEqual(client.published.length+client.uploads.length,0);
+  });
+  await test('login is requested only once for a batch and closing login settles its promise', async () => {
+    const files = {'a.md':'a','b.md':'b'};
+    const profile = makeProfile('https://site.example');
+    const plugin = makePublishingPlugin(files,profile);
+    const client = new FakeWordPressClient(plugin,profile);
+    (client as SafeAny).needLogin=()=>true;
+    let prompts=0;
+    Modal.openHook=modal=>{if (modal instanceof WpLoginModal) {prompts++;void (modal as SafeAny).onSubmit({username:'temporary',password:'temporary'},modal);}};
+    try {await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('a.md'),new TFile('b.md')],profile));}
+    finally {Modal.openHook=undefined;}
+    assertEqual(prompts,1); assertEqual(client.published.length,2);
+    assertEqual((await settingsForPersistence(plugin.settings)).profiles[0].username,undefined);
+    Modal.openHook=modal=>modal.close();
+    let rejected=false;
+    try {await openLoginModal(plugin,profile,async()=>true);} catch {rejected=true;} finally {Modal.openHook=undefined;}
+    assertEqual(rejected,true);
+  });
+  await test('nested image links and reference-style links are scanned without altering code or definitions', () => {
+    const content='[![pic](image.png)](article.md) [PDF][ref]\n\n[ref]: file.pdf\n\n`[code](secret.md)`\n%% [[private]] %%';
+    assertEqual(getFileReferences(content).map(ref=>ref.src).sort(),['article.md','file.pdf','image.png']);
+  });
+  await test('embedded image links preserve both child paths without overlapping replacements', async () => {
+    const files={'root/main.md':'![[child/embed]]','root/child/embed.md':'[![pic](image.png)](article.md)',
+      'root/child/image.png':'right','root/child/article.md':'right','root/image.png':'wrong','root/article.md':'wrong'};
+    const app=createFakeApp(files) as SafeAny;
+    const expanded=await expandNoteEmbeds(app,new TFile('root/main.md'),files['root/main.md']);
+    assertEqual(expanded.content,'[![pic](<root/child/image.png>)](<root/child/article.md>)');
+    const profile=makeProfile('https://site.example');
+    const plugin=makePublishingPlugin(files,profile);
+    const client=new FakeWordPressClient(plugin,profile);
+    const result=await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('root/main.md')],profile));
+    assertEqual(result.items.every(item=>item.status==='success'),true);
+    assertEqual(client.uploads,['image.png']);
+    const mainPost=client.published.find(post=>post.title==='main');
+    assertIncludes(mainPost?.content??'','<a href="https://site.example/posts/1/"><img');
+    assertEqual(mainPost?.content.includes('](article.md)'),false);
+  });
+  await test('plugin registers batch menu entries and unloading cancels the active batch window', async () => {
+    const files={'folder/a.md':'a','folder/sub/b.md':'b','other.md':'other'};
+    const profile=makeProfile('https://site.example');
+    const plugin=new WordpressPlugin() as SafeAny;
+    plugin.app=createFakeApp(files);
+    const listeners:Record<string,(menu:SafeAny,files:SafeAny)=>void>={};
+    plugin.app.workspace={on:(event:string,callback:SafeAny)=>{listeners[event]=callback;}};
+    plugin.loadData=async()=>({...DEFAULT_SETTINGS,version:'2',profiles:[profile]});
+    plugin.saveData=async()=>{};
+    await plugin.onload();
+    assertEqual(plugin.commands.some((command:SafeAny)=>command.id==='batchPublish'),true);
+    let action:()=>void=()=>{throw new Error('no batch menu item');};
+    const menu={addItem:(callback:SafeAny)=>callback({setTitle(){return this;},setIcon(){return this;},onClick(fn:()=>void){action=fn;}})};
+    listeners['files-menu'](menu,[new TFile('folder/a.md'),new TFolder('folder')]);
+    let opened:SafeAny;
+    Modal.openHook=modal=>{opened=modal;};
+    try {action();} finally {Modal.openHook=undefined;}
+    assertEqual([...opened.selected].sort(),['folder/a.md','folder/sub/b.md']);
+    plugin.onunload();
+    assertEqual(opened.cancelled,true);
+    assertEqual(plugin.batchOpen,false);
+  });
+  await test('attachment links preserve their original fragments after uploading once', async () => {
+    const files={'main.md':'[PDF](file.pdf#page=3) [[file.pdf#page=5|第五页]] ![[file.pdf#page=7]]','file.pdf':'pdf'};
+    const profile=makeProfile('https://site.example');
+    const plugin=makePublishingPlugin(files,profile);
+    const client=new FakeWordPressClient(plugin,profile);
+    const result=await client.publishBatch(await buildBatchPublishPlan(plugin.app,[new TFile('main.md')],profile));
+    assertEqual(result.items[0].status,'success');assertEqual(client.uploads,['file.pdf']);
+    for (const page of [3,5,7]) assertIncludes(client.published[0].content,`https://site.example/media/file.pdf#page=${page}`);
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {
     process.exit(1);
@@ -799,14 +991,15 @@ function makePublishingPlugin(files:Record<string,string>, profile:WpProfile, ma
   return {app,settings:{...DEFAULT_SETTINGS,autoPublishLinkedNotes:true,profiles:[profile]},i18n:{t:(key:string)=>key},saveSettings:async()=>{}};
 }
 class FakeWordPressClient extends AbstractWordPressClient {
-  published: Array<{title:string,content:string}> = [];
+  published: Array<{title:string,content:string,params?:WordPressPostParams}> = [];
   uploads: string[] = [];
   onUpload?:()=>void;
   constructor(plugin:SafeAny,profile:WpProfile) {super(plugin,profile);}
   protected needLogin():boolean {return false;}
-  async publish(title:string,content:string):Promise<SafeAny> {
-    this.published.push({title,content});
-    return {code:WordPressClientReturnCode.OK,data:{postId:String(this.published.length),link:`${this.profile.endpoint}/posts/${this.published.length}/`,categories:[1]}};
+  async publish(title:string,content:string,params?:WordPressPostParams):Promise<SafeAny> {
+    this.published.push({title,content,params:params?{...params}:undefined});
+    const id=params?.postId??String(this.published.length);
+    return {code:WordPressClientReturnCode.OK,data:{postId:id,link:`${this.profile.endpoint}/posts/${id}/`,categories:[1]}};
   }
   async getCategories():Promise<SafeAny[]> {return [];}
   async getPostTypes():Promise<string[]> {return ['post'];}
@@ -847,6 +1040,7 @@ function createFakeApp(
       },
     },
     vault: {
+      getMarkdownFiles(): TFile[] {return Object.keys(files).filter(path=>path.toLowerCase().endsWith('.md')).map(path=>new TFile(path));},
       async read(file: TFile): Promise<string> {
         return files[ file.path ] ?? '';
       },

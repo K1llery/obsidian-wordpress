@@ -1,4 +1,4 @@
-import { Plugin } from 'obsidian';
+import { Menu, Notice, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { WordpressSettingTab } from './settings';
 import { addIcons } from './icons';
 import { WordPressPostParams } from './wp-client';
@@ -11,6 +11,8 @@ import { AppState } from './app-state';
 import { DEFAULT_SETTINGS, settingsForPersistence, SettingsVersion, upgradeSettings, WordpressPluginSettings } from './plugin-settings';
 import { PassCrypto } from './pass-crypto';
 import { doClientPublish, setupMarkdownParser, showError } from './utils';
+import { BatchPublishModal } from './batch-publish-modal';
+import { collectBatchFiles } from './batch-publish';
 
 export default class WordpressPlugin extends Plugin {
 
@@ -27,6 +29,8 @@ export default class WordpressPlugin extends Plugin {
   }
 
   private ribbonWpIcon: HTMLElement | null = null;
+  private batchOpen = false;
+  private activeBatchModal: BatchPublishModal | null = null;
 
   async onload() {
     console.log('loading obsidian-wordpress plugin');
@@ -72,10 +76,20 @@ export default class WordpressPlugin extends Plugin {
       }
     });
 
+    this.addCommand({id:'batchPublish',name:this.i18n.t('command_batchPublish'),callback:() => this.openBatchPublish()});
+    const addBatchMenu = (menu: Menu, selection: TAbstractFile[]): void => {
+      if (!selection.some(file => file instanceof TFolder || (file instanceof TFile && file.extension.toLowerCase() === 'md'))) return;
+      menu.addItem(item => item.setTitle(this.i18n.t('command_batchPublish')).setIcon('wp-logo')
+        .onClick(() => this.openBatchPublish(selection)));
+    };
+    this.registerEvent(this.app.workspace.on('file-menu',(menu,file) => addBatchMenu(menu,[file])));
+    this.registerEvent(this.app.workspace.on('files-menu',(menu,files) => addBatchMenu(menu,files)));
+
     this.addSettingTab(new WordpressSettingTab(this));
   }
 
   onunload() {
+    this.activeBatchModal?.close();
   }
 
   async loadSettings() {
@@ -130,6 +144,17 @@ export default class WordpressPlugin extends Plugin {
     } else {
       showError(this.i18n.t('error_noProfile'));
     }
+  }
+
+  private openBatchPublish(selection: TAbstractFile[] = []): void {
+    if (!this.settings.profiles.length) { showError(this.i18n.t('error_noProfile')); return; }
+    if (this.batchOpen) { new Notice(this.i18n.t('batch_alreadyOpen')); return; }
+    this.batchOpen = true;
+    const modal = new BatchPublishModal(this,collectBatchFiles(this.app,selection),() => {
+      if (this.activeBatchModal === modal) {this.activeBatchModal = null;this.batchOpen = false;}
+    });
+    this.activeBatchModal = modal;
+    modal.open();
   }
 
   private registerProtocolHandler(): void {

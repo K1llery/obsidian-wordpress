@@ -10,7 +10,7 @@ import {
   WordPressPublishResult
 } from './wp-client';
 import { WpPublishModal } from './wp-publish-modal';
-import { PostType, PostTypeConst, Term } from './wp-api';
+import { PostStatus, PostType, PostTypeConst, Term } from './wp-api';
 import { ERROR_NOTICE_TIMEOUT, WP_DEFAULT_PROFILE_NAME } from './consts';
 import { isPromiseFulfilledResult, openWithBrowser, processFile, SafeAny, showError, } from './utils';
 import { WpProfile } from './wp-profile';
@@ -29,11 +29,17 @@ import {
   decodeMediaSrc,
   expandNoteEmbeds,
   getMediaRefs,
+  getFileReferences,
+  getMarkdownLinkRefs,
+  isLocalFileReference,
+  markdownLinkReplacement,
   isImageFile,
   MediaRef,
   mimeTypeFor,
   replaceContentRanges
 } from './publish-converters';
+import { BatchPublishOptions, BatchPublishPlan, BatchPublishResult, runBatchPublish } from './batch-publish';
+import { subpathAnchor } from './markdown-it-anchor-plugin';
 
 export abstract class AbstractWordPressClient implements WordPressClient {
 
@@ -97,7 +103,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
           if (authResult.code !== WordPressClientReturnCode.OK) {
             throw new Error(this.plugin.i18n.t('error_invalidUser'));
           }
-        }
+        } else { throw new Error(this.plugin.i18n.t('error_invalidUser')); }
       }
     } catch (error) {
       showError(error);
@@ -147,6 +153,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     sourceFile: TFile,
     publishedLinks?: Map<string, string>,
     updateMatterData?: (matter: MatterData) => void,
+    batchAttachments?: Set<string>,
   }): Promise<WordPressClientResult<WordPressPublishResult>> {
     const { postParams, auth, sourceFile, publishedLinks, updateMatterData } = params;
     const tagTerms = await this.getTags(postParams.tags, auth);
@@ -154,7 +161,8 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     await this.updatePostImages({
       auth,
       postParams,
-      sourceFile
+      sourceFile,
+      batchAttachments: params.batchAttachments
     });
     // mermaid diagrams are rendered to inline SVG before the synchronous
     // markdown pass, so the post is self-contained
@@ -172,7 +180,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     );
     const html = ensureEmbeddedStyles(AppState.markdownParser.render(postParams.content, { mermaidSvgs: mermaidResult.svgs }));
     const highlighted = (html.match(/class="language-/g) ?? []).length;
-    if (mermaidResult.rendered > 0 || highlighted > 0) {
+    if (!params.batchAttachments && (mermaidResult.rendered > 0 || highlighted > 0)) {
       // lets the user confirm the new publish pipeline actually ran
       new Notice(this.plugin.i18n.t('message_publishPipelineStats', {
         mermaid: String(mermaidResult.rendered),
@@ -191,7 +199,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         message: result.error.message
       }));
     } else {
-      new Notice(this.plugin.i18n.t('message_publishSuccessfully'));
+      if (!params.batchAttachments) new Notice(this.plugin.i18n.t('message_publishSuccessfully'));
       // post id will be returned if creating, true if editing
       const postId = result.data.postId;
       if (postId) {
@@ -218,7 +226,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
           await this.plugin.saveSettings();
         }
 
-        if (this.plugin.settings.showWordPressEditConfirm) {
+        if (!params.batchAttachments && this.plugin.settings.showWordPressEditConfirm) {
           openPostPublishedModal(this.plugin)
             .then(() => {
               openWithBrowser(`${this.profile.endpoint}/wp-admin/post.php`, {
@@ -247,11 +255,16 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     postParams: WordPressPostParams,
     auth: WordPressAuthParams,
     sourceFile: TFile,
+    batchAttachments?: Set<string>,
+    embedsOnly?: boolean,
   }): Promise<void> {
-    const { postParams, auth, sourceFile } = params;
+    const { postParams, auth, sourceFile, batchAttachments, embedsOnly } = params;
 
-    const mediaRefs = getMediaRefs(postParams.content);
+    const mediaRefs = batchAttachments && !embedsOnly
+      ? getFileReferences(postParams.content).filter(ref => ref.syntax.endsWith('-link'))
+      : getMediaRefs(postParams.content);
     if (mediaRefs.length === 0) {
+      if (batchAttachments && !embedsOnly) await this.updatePostImages({...params,embedsOnly:true});
       return;
     }
 
@@ -261,7 +274,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
     const uploadedInThisPublish = new Map<string, string>();
 
     for (const ref of mediaRefs) {
-      if (ref.isUrl) {
+      if (!isLocalFileReference(ref.src)) {
         // src is a url, skip uploading
         continue;
       }
@@ -278,6 +291,9 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       }
       // Failed/cyclic/deep note embeds must never become raw attachments.
       if (mediaFile.extension.toLowerCase() === 'md') continue;
+      if (batchAttachments && !batchAttachments.has(mediaFile.path)) {
+        throw new Error(this.plugin.i18n.t('batch_unapprovedAttachment', {path: mediaFile.path}));
+      }
 
       let url = uploadedInThisPublish.get(mediaFile.path);
       if (!url) {
@@ -294,6 +310,8 @@ export abstract class AbstractWordPressClient implements WordPressClient {
           url = result.data.url;
           uploadedInThisPublish.set(mediaFile.path, url);
           await this.setCachedMediaUrl(mediaFile, url);
+        } else if (batchAttachments) {
+          throw new Error(this.plugin.i18n.t('error_mediaUploadFailed', {name: mediaFile.name}) + ': ' + result.error.message);
         } else if (result.error.code === WordPressClientReturnCode.ServerInternalError) {
           new Notice(result.error.message, ERROR_NOTICE_TIMEOUT);
           continue;
@@ -322,8 +340,9 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       // to the original note content.
       await this.plugin.app.vault.process(sourceFile, noteContent => {
         const edits: typeof replacements = [];
-        for (const ref of getMediaRefs(noteContent)) {
-          if (ref.isUrl) continue;
+        const refs = batchAttachments && !embedsOnly ? getFileReferences(noteContent).filter(ref => ref.syntax.endsWith('-link')) : getMediaRefs(noteContent);
+        for (const ref of refs) {
+          if (!isLocalFileReference(ref.src)) continue;
           const dest = this.plugin.app.metadataCache.getFirstLinkpathDest(decodeMediaSrc(ref.src.split('#')[0]),sourceFile.path);
           if (!(dest instanceof TFile) || dest.extension.toLowerCase() === 'md') continue;
           const url = uploadedInThisPublish.get(dest.path);
@@ -332,6 +351,7 @@ export abstract class AbstractWordPressClient implements WordPressClient {
         return replaceContentRanges(noteContent,edits);
       });
     }
+    if (batchAttachments && !embedsOnly) await this.updatePostImages({...params,embedsOnly:true});
   }
 
   /**
@@ -375,6 +395,44 @@ export abstract class AbstractWordPressClient implements WordPressClient {
       throw new Error(this.plugin.i18n.t('error_noActiveFile'));
     }
     return this.publishFile(file, { defaultPostParams });
+  }
+
+  /** Batch publishing never expands the approved set or opens per-note dialogs. */
+  async publishBatch(plan: BatchPublishPlan, options: BatchPublishOptions & {status?: PostStatus} = {}): Promise<BatchPublishResult> {
+    if (plan.profileName !== this.profile.name || plan.endpoint !== this.profile.endpoint) {
+      throw new Error(this.plugin.i18n.t('batch_profileChanged'));
+    }
+    if (options.shouldCancel?.() || !plan.entries.length) {
+      return {cancelled: true, items: plan.entries.map(entry => ({path:entry.file.path,status:'skipped'}))};
+    }
+    const auth = await this.getAuth();
+    const attachments = new Set(plan.attachments.map(file => file.path));
+    return runBatchPublish(plan, async (entry, links, receipt) => {
+      const matter = {...entry.matter};
+      if (matter.profileName && matter.profileName !== this.profile.name) {
+        delete matter.postId;
+        delete matter.postLink;
+        delete matter.categories;
+      }
+      const params = this.readFromFrontMatter(entry.file.basename, matter, this.buildDefaultPostParams());
+      if (receipt) params.postId = receipt.postId;
+      if (options.status) params.status = options.status;
+      params.content = entry.content;
+      const edits: Array<{start:number,end:number,replacement:string}> = [];
+      for (const ref of [...getMediaRefs(entry.content), ...getMarkdownLinkRefs(entry.content)]) {
+        if (!ref.syntax.startsWith('markdown') || !isLocalFileReference(ref.src)) continue;
+        const [path,...fragment] = ref.src.split('#');
+        const dest = this.plugin.app.metadataCache.getFirstLinkpathDest(decodeMediaSrc(path), entry.file.path);
+        if (!(dest instanceof TFile) || dest.extension.toLowerCase() !== 'md') continue;
+        const link = links.get(dest.path);
+        if (link) {
+          const anchor = fragment.length ? '#' + encodeURIComponent(subpathAnchor(decodeMediaSrc(fragment.join('#')))) : '';
+          edits.push({start:ref.start,end:ref.end,replacement:markdownLinkReplacement(ref, link.split('#')[0] + anchor)});
+        }
+      }
+      params.content = replaceContentRanges(params.content,edits);
+      return this.tryToPublish({auth,postParams:params,sourceFile:entry.file,publishedLinks:links,batchAttachments:attachments});
+    },options);
   }
 
   /**
@@ -663,6 +721,9 @@ function normalizeTags(value: SafeAny): string[] {
  * Builds the replacement of a media reference with the WordPress URL.
  */
 function buildMediaReplacement(ref: MediaRef, file: TFile, url: string): string {
+  const fragment = ref.src.indexOf('#');
+  if (fragment >= 0) url = url.split('#')[0] + ref.src.slice(fragment);
+  if (ref.syntax === 'markdown-link' || ref.syntax === 'wiki-link') return markdownLinkReplacement(ref,url);
   if (!isImageFile(file)) {
     // non-image media files are linked instead of embedded
     return `[${ref.altText ?? file.name}](${url})`;

@@ -4,6 +4,8 @@ import { SafeAny, stripFrontmatter } from './utils';
 import { WpProfile } from './wp-profile';
 import { WikiLinkResolution } from './markdown-it-wikilink-plugin';
 import MarkdownIt from 'markdown-it';
+import markdownLink from 'markdown-it/lib/rules_inline/link.mjs';
+import markdownImage from 'markdown-it/lib/rules_inline/image.mjs';
 
 /**
  * The maximum depth of nested note embeds (`![[note]]`).
@@ -77,11 +79,86 @@ export interface MediaRef {
 
   isUrl: boolean;
 
-  syntax: 'markdown' | 'wiki';
+  syntax: 'markdown' | 'wiki' | 'markdown-link' | 'wiki-link';
+  title?: string;
 }
 
-const MARKDOWN_IMAGE_RE = /!\[([^\]]*)\]\(\s*(?:<([^<>]*)>|((?:[^()\s\\]|\([^()\s]*\))+))(?:\s+"([^"]*)")?\s*\)/g;
 const WIKI_EMBED_RE = /!\[\[([^|\]\n]+)(?:\|([^\]\n]+))?\]\]/g;
+
+/** Uses CommonMark's link rules for inline and reference-style local links. */
+export function getMarkdownLinkRefs(content: string): MediaRef[] {
+  return getMarkdownRefs(content, false);
+}
+
+function getMarkdownRefs(content: string, images: boolean): MediaRef[] {
+  const md = new MarkdownIt();
+  const env = {};
+  md.parse(content, env);
+  const excluded = findExcludedRanges(content);
+  const refs: MediaRef[] = [];
+  for (let pos = 0; pos < content.length; pos++) {
+    const image = content[pos] === '!' && content[pos + 1] === '[';
+    if (images !== image) continue;
+    if (!image && content[pos] !== '[') continue;
+    if (content[pos + (image ? 2 : 1)] === '[' || (!image && (content[pos - 1] === '[' || content[pos - 1] === '!'))) continue;
+    if (inRanges(pos, excluded) || isEscaped(content, pos)) continue;
+    const state = new md.inline.State(content, md, env, []);
+    state.pos = pos;
+    const labelStart = pos + (image ? 1 : 0);
+    const labelEnd = md.helpers.parseLinkLabel(state, labelStart, !image);
+    if (labelEnd < 0) continue;
+    // Reference definitions are block syntax, not links to replace.
+    const lineStart = content.lastIndexOf('\n', pos - 1) + 1;
+    if (!image && content[labelEnd + 1] === ':' && /^ {0,3}$/.test(content.slice(lineStart, pos))) continue;
+    if (!(image ? markdownImage : markdownLink)(state, false)) continue;
+    const token = state.tokens.find(it => it.type === (image ? 'image' : 'link_open'));
+    let src = token?.attrGet(image ? 'src' : 'href');
+    if (!src) continue;
+    if (content[labelEnd + 1] === '(') {
+      let start = labelEnd + 2;
+      while (/\s/.test(content[start] ?? '') && start < state.pos) start++;
+      const destination = md.helpers.parseLinkDestination(content, start, state.pos);
+      if (destination.ok) src = destination.str;
+    }
+    let altText = content.slice(labelStart + 1, labelEnd);
+    let width: string | undefined;
+    let height: string | undefined;
+    if (image) {
+      const size = altText.match(/\|(\d+)(?:x(\d+))?$/);
+      if (size) { width = size[1]; height = size[2]; altText = altText.slice(0, size.index); }
+    }
+    refs.push({start: pos, end: state.pos, original: content.slice(pos, state.pos), src,
+      altText, width, height, isUrl: isValidHttpUrl(src), syntax: image ? 'markdown' : 'markdown-link',
+      title: token?.attrGet('title') ?? undefined});
+    pos = state.pos - 1;
+  }
+  return refs;
+}
+
+/** Includes wiki links and embeds, and ordinary Markdown attachment/note links. */
+export function getFileReferences(content: string): MediaRef[] {
+  const refs = [...getMediaRefs(content), ...getMarkdownLinkRefs(content)];
+  const excluded = findExcludedRanges(content);
+  const wiki = /\[\[([^|\]\n]+)(?:\|([^\]\n]+))?\]\]/g;
+  for (const match of content.matchAll(wiki)) {
+    const start = match.index!;
+    if (content[start - 1] === '!' || isEscaped(content, start) || inRanges(start, excluded)) continue;
+    refs.push({start, end: start + match[0].length, original: match[0], src: match[1].trim(),
+      altText: match[2] ?? match[1], isUrl: isValidHttpUrl(match[1]), syntax: 'wiki-link'});
+  }
+  return refs.sort((a,b) => a.start - b.start);
+}
+
+export function isLocalFileReference(src: string): boolean {
+  return !/^(?:[a-z][a-z\d+.-]*:|\/\/|#|\?)/i.test(src);
+}
+
+export function markdownLinkReplacement(ref: MediaRef, url: string): string {
+  const title = ref.title ? ' "' + ref.title.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' : '';
+  let label = ref.syntax === 'wiki-link' ? (ref.altText ?? '').replace(/([\\\[\]])/g, '\\$1') : ref.altText ?? '';
+  if (ref.syntax === 'markdown' && ref.width) label += '|' + ref.width + (ref.height ? 'x' + ref.height : '');
+  return `[${label}](<${url.replace(/</g, '%3C').replace(/>/g, '%3E')}>${title})`;
+}
 
 /**
  * Returns the `[start, end)` ranges of fenced code blocks and inline
@@ -167,47 +244,10 @@ function inRanges(index: number, ranges: Array<[ number, number ]>): boolean {
  * code fences and inline code spans are ignored.
  */
 export function getMediaRefs(content: string): MediaRef[] {
-  const refs: MediaRef[] = [];
+  const refs: MediaRef[] = getMarkdownRefs(content, true);
   const codeRanges = findExcludedRanges(content);
 
   let match: RegExpExecArray | null;
-  MARKDOWN_IMAGE_RE.lastIndex = 0;
-  while ((match = MARKDOWN_IMAGE_RE.exec(content)) !== null) {
-    if (inRanges(match.index, codeRanges) || isEscaped(content, match.index)) {
-      continue;
-    }
-    // match groups: 1 = alt, 2 = braced path, 3 = bare path, 4 = title
-    const src = (match[2] ?? match[3] ?? '').trim();
-    if (src.length === 0) {
-      continue;
-    }
-    let altText: string | undefined = match[1];
-    let width: string | undefined;
-    let height: string | undefined;
-    // Obsidian allows size in the alt text: ![alt|100x200](path)
-    const sizeSep = altText.lastIndexOf('|');
-    if (sizeSep >= 0) {
-      const size = altText.substring(sizeSep + 1).trim();
-      if (/^\d+(x\d+)?$/.test(size)) {
-        altText = altText.substring(0, sizeSep).trim();
-        const sizeParts = size.split('x');
-        width = sizeParts[0];
-        height = sizeParts[1];
-      }
-    }
-    refs.push({
-      start: match.index,
-      end: match.index + match[0].length,
-      original: match[0],
-      src,
-      altText: altText?.length ? altText : undefined,
-      width,
-      height,
-      isUrl: isValidHttpUrl(src),
-      syntax: 'markdown',
-    });
-  }
-
   WIKI_EMBED_RE.lastIndex = 0;
   while ((match = WIKI_EMBED_RE.exec(content)) !== null) {
     if (inRanges(match.index, codeRanges) || isEscaped(content, match.index)) {
@@ -450,25 +490,35 @@ export async function expandNoteEmbeds(
 
 /** Resolve references before flattening a child note into another note. */
 function rebaseNoteReferences(app: App, sourceFile: TFile, content: string): string {
-  const replacements: Array<{start: number, end: number, replacement: string}> = [];
-  for (const ref of getMediaRefs(content)) {
-    if (ref.isUrl) continue;
-    const [localPath, ...fragment] = ref.src.split('#');
-    const dest = app.metadataCache.getFirstLinkpathDest(decodeMediaSrc(localPath), sourceFile.path);
-    if (!dest) continue;
-    const suffix = fragment.length ? '#' + fragment.join('#') : '';
-    const target = ref.syntax === 'markdown'
-      ? dest.path.split('/').map(encodeURIComponent).join('/') + suffix
-      : dest.path + suffix;
-    const offset = ref.syntax === 'markdown' ? ref.original.indexOf('](') + 2 : 3;
-    const start = ref.original.indexOf(ref.src, offset);
-    if (start >= 0) replacements.push({start:ref.start, end:ref.end, replacement:ref.original.slice(0,start) + target + ref.original.slice(start + ref.src.length)});
+  let result = content;
+  // A link label can contain an image. Re-scan after changing its inner image
+  // rather than replacing overlapping parent/child ranges from one snapshot.
+  for (const scan of [getMediaRefs, getMarkdownLinkRefs]) {
+    const edits: Array<{start: number, end: number, replacement: string}> = [];
+    for (const ref of scan(result)) {
+      if (!isLocalFileReference(ref.src)) continue;
+      const [localPath, ...fragment] = ref.src.split('#');
+      const dest = app.metadataCache.getFirstLinkpathDest(decodeMediaSrc(localPath), sourceFile.path);
+      if (!dest) continue;
+      const suffix = fragment.length ? '#' + fragment.join('#') : '';
+      const target = ref.syntax.startsWith('markdown')
+        ? dest.path.split('/').map(encodeURIComponent).join('/') + suffix
+        : dest.path + suffix;
+      const offset = ref.syntax.startsWith('markdown') ? ref.original.indexOf('](') + 2 : 3;
+      const start = ref.original.indexOf(ref.src, offset);
+      const replacement = ref.syntax.startsWith('markdown')
+        ? (ref.syntax === 'markdown' ? '!' : '') + markdownLinkReplacement(ref, target)
+        : start >= 0 ? ref.original.slice(0,start) + target + ref.original.slice(start + ref.src.length) : ref.original;
+      edits.push({start:ref.start, end:ref.end, replacement});
+    }
+    result = replaceContentRanges(result,edits);
   }
-  const ranges = findExcludedRanges(content);
+  const replacements: Array<{start: number, end: number, replacement: string}> = [];
+  const ranges = findExcludedRanges(result);
   const links = /\[\[([^\][\n]+)\]\]/g;
   let match: RegExpExecArray | null;
-  while ((match = links.exec(content)) !== null) {
-    if (content[match.index - 1] === '!' || isEscaped(content,match.index) || inRanges(match.index,ranges)) continue;
+  while ((match = links.exec(result)) !== null) {
+    if (result[match.index - 1] === '!' || isEscaped(result,match.index) || inRanges(match.index,ranges)) continue;
     const [target, ...aliasParts] = match[1].split('|');
     const [localPath, ...subpathParts] = target.split('#');
     const dest = app.metadataCache.getFirstLinkpathDest(localPath.trim(),sourceFile.path);
@@ -477,7 +527,7 @@ function rebaseNoteReferences(app: App, sourceFile: TFile, content: string): str
     const display = aliasParts.length ? aliasParts.join('|') : localPath.trim() + (subpath ? ' > ' + subpath.slice(1) : '');
     replacements.push({start:match.index,end:links.lastIndex,replacement:`[[${dest.path}${subpath}|${display}]]`});
   }
-  return replaceContentRanges(content,replacements);
+  return replaceContentRanges(result,replacements);
 }
 
 /**
