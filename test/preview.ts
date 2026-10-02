@@ -110,7 +110,14 @@ async function main(): Promise<void> {
     }
   }
 
-  const html = ensureEmbeddedStyles(AppState.markdownParser.render(content));
+  let html = AppState.markdownParser.render(content);
+  // mermaid cannot run in the Node-based preview; mark those blocks
+  // explicitly so they are not mistaken for a rendering failure
+  html = html.replace(/<pre class="mermaid">([\s\S]*?)<\/pre>/g,
+    (_m, code: string) => `<div style="border:2px dashed #4a90d9;border-radius:6px;padding:.6em 1em;background:#eaf3fc;font-size:.9em">` 
+      + `📐 Mermaid 图：发布时会渲染为内嵌 SVG（本地预览无法运行 mermaid，此处仅示意，源代码见下方）</div>`
+      + `<pre class="mermaid">${code}</pre>`);
+  html = ensureEmbeddedStyles(html);
   const page = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
