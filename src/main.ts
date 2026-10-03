@@ -77,13 +77,25 @@ export default class WordpressPlugin extends Plugin {
     });
 
     this.addCommand({id:'batchPublish',name:this.i18n.t('command_batchPublish'),callback:() => this.openBatchPublish()});
-    const addBatchMenu = (menu: Menu, selection: TAbstractFile[]): void => {
+    const batchMenuContexts = new WeakMap<Menu, {selection: TAbstractFile[], multiple: boolean}>();
+    const addBatchMenu = (menu: Menu, selection: TAbstractFile[], multiple = false): void => {
       if (!selection.some(file => file instanceof TFolder || (file instanceof TFile && file.extension.toLowerCase() === 'md'))) return;
+      const existing = batchMenuContexts.get(menu);
+      if (existing) {
+        if (multiple || !existing.multiple) {
+          existing.selection = [...selection];
+          existing.multiple = multiple;
+        }
+        return;
+      }
+      // Capture the context before the explorer clears its selection on close.
+      const context = {selection: [...selection], multiple};
+      batchMenuContexts.set(menu,context);
       menu.addItem(item => item.setTitle(this.i18n.t('command_batchPublish')).setIcon('wp-logo')
-        .onClick(() => this.openBatchPublish(selection)));
+        .onClick(() => this.openBatchPublish(context.selection)));
     };
     this.registerEvent(this.app.workspace.on('file-menu',(menu,file) => addBatchMenu(menu,[file])));
-    this.registerEvent(this.app.workspace.on('files-menu',(menu,files) => addBatchMenu(menu,files)));
+    this.registerEvent(this.app.workspace.on('files-menu',(menu,files) => addBatchMenu(menu,files,true)));
 
     this.addSettingTab(new WordpressSettingTab(this));
   }
@@ -150,9 +162,10 @@ export default class WordpressPlugin extends Plugin {
     if (!this.settings.profiles.length) { showError(this.i18n.t('error_noProfile')); return; }
     if (this.batchOpen) { new Notice(this.i18n.t('batch_alreadyOpen')); return; }
     this.batchOpen = true;
+    const initialFolder = selection.length === 1 && selection[0] instanceof TFolder ? selection[0].path : '';
     const modal = new BatchPublishModal(this,collectBatchFiles(this.app,selection),() => {
       if (this.activeBatchModal === modal) {this.activeBatchModal = null;this.batchOpen = false;}
-    });
+    },initialFolder);
     this.activeBatchModal = modal;
     modal.open();
   }

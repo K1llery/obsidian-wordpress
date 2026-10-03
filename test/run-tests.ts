@@ -950,15 +950,41 @@ async function main(): Promise<void> {
     await plugin.onload();
     assertEqual(plugin.commands.some((command:SafeAny)=>command.id==='batchPublish'),true);
     let action:()=>void=()=>{throw new Error('no batch menu item');};
-    const menu={addItem:(callback:SafeAny)=>callback({setTitle(){return this;},setIcon(){return this;},onClick(fn:()=>void){action=fn;}})};
-    listeners['files-menu'](menu,[new TFile('folder/a.md'),new TFolder('folder')]);
+    let menuItems=0;
+    const menu={addItem:(callback:SafeAny)=>{menuItems++;return callback({setTitle(){return this;},setIcon(){return this;},onClick(fn:()=>void){action=fn;}});}};
+    const selected=[new TFile('folder/a.md'),new TFile('folder/sub/b.md')];
+    listeners['file-menu'](menu,selected[0]);
+    listeners['files-menu'](menu,selected);
+    listeners['file-menu'](menu,selected[0]);
+    selected.length=0;
     let opened:SafeAny;
     Modal.openHook=modal=>{opened=modal;};
     try {action();} finally {Modal.openHook=undefined;}
     assertEqual([...opened.selected].sort(),['folder/a.md','folder/sub/b.md']);
+    assertEqual(menuItems,1);
     plugin.onunload();
     assertEqual(opened.cancelled,true);
     assertEqual(plugin.batchOpen,false);
+  });
+  await test('folder context opens with its folder and all descendant Markdown notes selected', async () => {
+    const files={'folder/a.md':'a','folder/sub/b.md':'b','folder/image.png':'image','folder-other/c.md':'c'};
+    const profile=makeProfile('https://site.example');
+    const plugin=new WordpressPlugin() as SafeAny;
+    plugin.app=createFakeApp(files);
+    const listeners:Record<string,(menu:SafeAny,file:SafeAny)=>void>={};
+    plugin.app.workspace={on:(event:string,callback:SafeAny)=>{listeners[event]=callback;}};
+    plugin.loadData=async()=>({...DEFAULT_SETTINGS,version:'2',profiles:[profile]});
+    plugin.saveData=async()=>{};
+    await plugin.onload();
+    let action!:()=>void;
+    const menu={addItem:(callback:SafeAny)=>callback({setTitle(){return this;},setIcon(){return this;},onClick(fn:()=>void){action=fn;}})};
+    listeners['file-menu'](menu,new TFolder('folder'));
+    let opened:SafeAny;
+    Modal.openHook=modal=>{opened=modal;};
+    try {action();} finally {Modal.openHook=undefined;}
+    assertEqual(opened.folder,'folder');
+    assertEqual([...opened.selected].sort(),['folder/a.md','folder/sub/b.md']);
+    plugin.onunload();
   });
   await test('attachment links preserve their original fragments after uploading once', async () => {
     const files={'main.md':'[PDF](file.pdf#page=3) [[file.pdf#page=5|第五页]] ![[file.pdf#page=7]]','file.pdf':'pdf'};

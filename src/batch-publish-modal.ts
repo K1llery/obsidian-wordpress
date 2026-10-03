@@ -21,9 +21,10 @@ export class BatchPublishModal extends AbstractModal {
     if (!this.released) {this.released = true; this.onDone();}
   }
 
-  constructor(plugin: WordpressPlugin, files: TFile[], private readonly onDone: () => void) {
+  constructor(plugin: WordpressPlugin, files: TFile[], private readonly onDone: () => void, initialFolder = '') {
     super(plugin);
     this.selected = new Set(files.map(file => file.path));
+    this.folder = initialFolder;
     this.profile = plugin.settings.profiles.find(profile => profile.isDefault) ?? plugin.settings.profiles[0];
     this.status = plugin.settings.defaultPostStatus === PostStatus.Future ? PostStatus.Draft : plugin.settings.defaultPostStatus;
   }
@@ -61,7 +62,8 @@ export class BatchPublishModal extends AbstractModal {
     const updateCount = (): void => { count.setText(this.t('batch_selectedCount',{count:String(this.selected.size)})); };
     let query = '';
     const list = content.createDiv({cls:'wp-batch-file-list'});
-    const visibleFiles = (): TFile[] => files.filter(file => file.path.toLowerCase().includes(query));
+    const visibleFiles = (): TFile[] => files.filter(file => file.path.toLowerCase().includes(query))
+      .sort((a,b) => Number(this.selected.has(b.path)) - Number(this.selected.has(a.path)) || a.path.localeCompare(b.path));
     const renderFiles = (): void => {
       list.empty();
       const filtered = visibleFiles();

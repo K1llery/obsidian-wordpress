@@ -147,6 +147,11 @@ The same menu on a folder selects all Markdown notes in that folder, including
 subfolders. The batch window also supports searching, checkboxes and folder
 selection.
 
+Opening the batch window from the context menu automatically checks the selected
+notes. A folder context also selects that folder in the dropdown and checks its
+descendant Markdown notes. Checked notes appear first so the initial selection
+remains visible even when the vault has more than 200 notes.
+
 Choose one target account and an article status, then click **Preview publish
 list**. This read-only scan lists the selected articles, additional referenced
 articles and attachments before any uploads or publications occur. Referenced
