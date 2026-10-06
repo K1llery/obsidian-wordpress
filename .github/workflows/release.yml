@@ -25,6 +25,7 @@ jobs:
           npm ci
           npm test
           npm run build
+          npm run test:startup
           mkdir ${{ env.PLUGIN_NAME }}
           cp main.js manifest.json styles.css ${{ env.PLUGIN_NAME }}
           zip -r ${{ env.PLUGIN_NAME }}.zip ${{ env.PLUGIN_NAME }}

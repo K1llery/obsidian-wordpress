@@ -1,4 +1,5 @@
 import MarkdownIt from 'markdown-it';
+import { MarkdownItMathJax3PluginInstance } from '../src/markdown-it-mathjax3-plugin';
 import footnote from 'markdown-it-footnote';
 import { TFile, TFolder, Modal, setRequestUrlHandler } from './obsidian-stub';
 import { buildBatchPublishPlan, collectBatchFiles } from '../src/batch-publish';
@@ -8,7 +9,7 @@ import WordpressPlugin from '../src/main';
 import { markdownItAnchorPlugin } from '../src/markdown-it-anchor-plugin';
 import { AbstractWordPressClient } from '../src/abstract-wp-client';
 import { WordPressClientReturnCode, WordPressPostParams } from '../src/wp-client';
-import { DEFAULT_SETTINGS, ApiType, settingsForPersistence } from '../src/plugin-settings';
+import { DEFAULT_SETTINGS, ApiType, MathJaxOutputType, settingsForPersistence } from '../src/plugin-settings';
 import { ConfirmCode } from '../src/confirm-modal';
 import { WpProfile } from '../src/wp-profile';
 import { WpPublishModal } from '../src/wp-publish-modal';
@@ -82,6 +83,25 @@ function createParser(): MarkdownIt {
 
 async function main(): Promise<void> {
   console.log('markdown rendering:');
+
+  await test('bundled MathJax renders SVG equations and TeX extensions', () => {
+    const md = new MarkdownIt().use(MarkdownItMathJax3PluginInstance.plugin);
+    MarkdownItMathJax3PluginInstance.updateOutputType(MathJaxOutputType.SVG);
+    try {
+      const formulas = [
+        String.raw`\frac{a}{b}`,
+        String.raw`\ce{H2O}`,
+        String.raw`\begin{pmatrix}1 & 2\\3 & 4\end{pmatrix}`,
+      ];
+      for (const formula of formulas) {
+        const html = md.renderInline(`$${formula}$`);
+        assertIncludes(html, '<svg');
+        assertEqual(html.includes('data-mjx-error'), false);
+      }
+    } finally {
+      MarkdownItMathJax3PluginInstance.updateOutputType(MathJaxOutputType.TeX);
+    }
+  });
 
   await test('wikilink to an unpublished note is rendered as plain text', () => {
     const md = createParser();
